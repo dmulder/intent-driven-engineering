@@ -1,1 +1,1 @@
-{"bindings":{},"events":["E-a7d0b3d575343002b610d19f330d474fd7eef22f5cff3f89f0b0ede37e242b4e"],"intents":{},"schema_version":1}
+{"bindings":{"B-beb8d4beae4491932a588311742c6a39355fa47d8d67345e709dd97b1b0b5d7d":1},"events":["E-a7d0b3d575343002b610d19f330d474fd7eef22f5cff3f89f0b0ede37e242b4e","E-cfceb3f992a5f8bcb8fb0367e1ced4bd5c476e457a2a6003a32d324d4249f7cf"],"intents":{"I-e3720c15ea8b4f0d0586a7fd8a79bd9d2bcd621c43c9e56bebf8a575fc9a0fa1":1},"schema_version":1}
