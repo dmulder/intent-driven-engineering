@@ -211,12 +211,119 @@ def touches(start, end, other_start, other_end):
     return start < other_end and other_start < end
 
 
-def binding_affected(binding, change):
+def map_preserved_range(start, end, before, after):
+    """Map [start,end) through a file change when it lies entirely in equal bytes.
+
+    Returns (new_start, new_end) or None when deletion, mode/opaque change, or any
+    overlap with a non-equal region makes relocation authoritative rather than
+    coordinate maintenance. Textual equality never invents semantic identity.
+    """
+    if before is None or after is None:
+        return None
+    if before[0] != after[0]:
+        return None
+    a, b = before[1], after[1]
+    if not (0 <= start <= end <= len(a)):
+        return None
+    if before[0] == "120000" or b"\0" in a or b"\0" in b:
+        return (start, end) if a == b and (start, end) == (0, len(a)) else None
+    if a == b:
+        return (start, end)
+    mapped = []
+    cursor = start
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if cursor >= end and not (start == end and cursor == start):
+            break
+        if tag != "equal":
+            if touches(start, end, i1, i2):
+                return None
+            continue
+        if start == end:
+            if i1 <= start <= i2:
+                return (j1 + (start - i1), j1 + (start - i1))
+            continue
+        overlap_start = max(cursor, i1)
+        overlap_end = min(end, i2)
+        if overlap_start >= overlap_end:
+            continue
+        if overlap_start != cursor:
+            return None
+        mapped.append((j1 + (overlap_start - i1), j1 + (overlap_end - i1)))
+        cursor = overlap_end
+    if start == end:
+        return None
+    if cursor != end or not mapped:
+        return None
+    new_start, new_end = mapped[0][0], mapped[-1][1]
+    if a[start:end] != b[new_start:new_end]:
+        return None
+    return (new_start, new_end)
+
+
+def live_target(binding, current_source, objects):
+    """Resolve a binding onto current bytes via exact pin or preserved-range mapping."""
     target = binding["target"]
-    return (target["path"] == change["path"] and
+    entry = current_source.get(target["path"])
+    if entry is None:
+        return None
+    pinned = objects.get(target["source"])
+    if pinned is None or not (0 <= target["start"] <= target["end"] <= len(pinned)):
+        return None
+    expected = {"source": target["source"], "mode": target["mode"]}
+    if ref(entry) == expected:
+        return {"path": target["path"], "start": target["start"], "end": target["end"],
+                "mode": target["mode"], "content": pinned[target["start"]:target["end"]]}
+    mapped = map_preserved_range(target["start"], target["end"], (target["mode"], pinned), entry)
+    if mapped is None:
+        return None
+    start, end = mapped
+    content = pinned[target["start"]:target["end"]]
+    if entry[1][start:end] != content:
+        return None
+    return {"path": target["path"], "start": start, "end": end, "mode": entry[0], "content": content}
+
+
+def range_affected(path, start, end, change):
+    return (path == change["path"] and
             (change["before"] is None or change["after"] is None or
              change["before"]["mode"] != change["after"]["mode"] or
-             any(touches(target["start"], target["end"], *part["before"]) for part in change["intervals"])))
+             any(touches(start, end, *part["before"]) for part in change["intervals"])))
+
+
+def binding_affected(binding, change, live=None):
+    if live is not None:
+        return range_affected(live["path"], live["start"], live["end"], change)
+    target = binding["target"]
+    return range_affected(target["path"], target["start"], target["end"], change)
+
+
+def affected_by_changes(bindings, changes, current_source=None, objects=None):
+    """Return binding id -> binding for ranges that touch a change interval."""
+    affected = {}
+    for i, binding in bindings.items():
+        if binding["status"] not in ("active", "unresolved"):
+            continue
+        live = None
+        if current_source is not None and objects is not None:
+            live = live_target(binding, current_source, objects)
+            if live is None:
+                # Unresolvable pins are treated as affected so agents must rebind.
+                if any(binding["target"]["path"] == change["path"] for change in changes):
+                    affected[i] = binding
+                continue
+        for change in changes:
+            if binding_affected(binding, change, live=live):
+                affected[i] = binding
+                break
+    return affected
+
+
+VERIFICATION_STATUSES = ("declared", "pending", "verified", "failed", "unverifiable")
+
+
+def verification_of(binding):
+    value = binding.get("verification") or {"status": "declared"}
+    return value
 
 
 def record_path(kind, identity, revision=None):
@@ -233,7 +340,7 @@ EMPTY_MANIFEST = {"schema_version": 1, "intents": {}, "bindings": {}, "events": 
 
 
 class Store:
-    def __init__(self, entries):
+    def __init__(self, entries, enforce_schema_definitions=True):
         self.entries = entries
         self.records = {}
         self.errors = []
@@ -301,11 +408,12 @@ class Store:
                     collection[key] = value
             except (IntentError, ValueError, TypeError) as exc:
                 self.error("PARSE", path, str(exc))
-        for name in SCHEMAS:
-            path = f".intent/schema/{name}.schema.json"
-            entry = entries.get(path)
-            if entry is None or entry[1] != canonical(published(name)) + b"\n":
-                self.error("SCHEMA_DEFINITION", path, "published schema must match this validator version; run init for missing schemas")
+        if enforce_schema_definitions:
+            for name in SCHEMAS:
+                path = f".intent/schema/{name}.schema.json"
+                entry = entries.get(path)
+                if entry is None or entry[1] != canonical(published(name)) + b"\n":
+                    self.error("SCHEMA_DEFINITION", path, "published schema must match this validator version; run init for missing schemas")
         if self.config is None:
             self.error("MISSING_CONFIG", ".intent/config.json", "run init")
         if ".intent/manifests/current.json" not in self.records:
@@ -381,18 +489,26 @@ class Store:
                 self.error("TARGET", i, f"revision {r}: missing snapshot or invalid byte range")
             elif (target["mode"] == "120000" or b"\0" in raw) and (target["start"], target["end"]) != (0, len(raw)):
                 self.error("OPAQUE_RANGE", i, "binary/symlink targets require whole-object ranges")
-        # Every current active binding must target the exact final source. Moving a range
-        # because of edits elsewhere is explicit rebinding, never an inferred identity.
+        # Active bindings may keep an older snapshot pin when edits elsewhere leave their
+        # bytes intact and uniquely mappable. Overlapping or ambiguous moves still need
+        # explicit rebinding; textual equality never invents semantic identity.
         for i, binding in sorted(self.current("binding").items()):
             if binding["status"] not in ("active", "unresolved"):
                 continue
             target = binding["target"]
-            entry = final_source.get(target["path"])
-            if ref(entry) != {"source": target["source"], "mode": target["mode"]}:
-                self.error("STALE_TARGET", i, f"{target['path']}:{target['start']}:{target['end']}: explicitly rebind to current bytes")
+            live = live_target(binding, final_source, self.objects)
+            if live is None:
+                self.error("STALE_TARGET", i, f"{target['path']}:{target['start']}:{target['end']}: explicitly rebind; range missing or not uniquely preserved")
             intent = self.current("intent").get(binding["intent_id"])
             if intent and intent["status"] != "active":
                 self.error("LIFECYCLE", i, "retired/superseded intent cannot retain active bindings")
+            status = verification_of(binding)["status"]
+            if status == "verified":
+                value = verification_of(binding)
+                if not value.get("method") or not value.get("evidence"):
+                    self.error("VERIFICATION", i, "verified bindings require method and evidence")
+            elif status not in VERIFICATION_STATUSES:
+                self.error("VERIFICATION", i, f"unknown verification status {status}")
         events = self.manifest["events"]
         if len(set(events)) != len(events) or set(events) != set(self.events):
             self.error("EVENT_INDEX", ".intent/manifests/current.json", "event list must contain every event exactly once")
@@ -417,11 +533,14 @@ def validate(entries, base_entries=None):
     store = Store(entries)
     base_entries = base_entries or {}
     base_exists = ".intent/config.json" in base_entries
-    base = Store(base_entries) if base_exists else None
+    # Base history may predate the running validator's published schemas; enforce
+    # schema-definition pins only on the proposed tree being validated.
+    base = Store(base_entries, enforce_schema_definitions=False) if base_exists else None
     if store.errors:
         return store.errors
     if base and base.errors:
         return [{"code": "INVALID_BASE", "path": ".intent", "message": "base metadata is invalid; inspect trusted history"}] + base.errors
+
     for path, value in sorted(base_entries.items()):
         if not metadata(path) or path.startswith(".intent/schema/") or not path.endswith(".json"):
             continue
@@ -446,19 +565,48 @@ def validate(entries, base_entries=None):
     current_source = source(base_entries).copy()
     current_intents = base.current("intent").copy()
     current_bindings = base.current("binding").copy()
+    live = {}
+    for i, binding in current_bindings.items():
+        if binding["status"] in ("active", "unresolved"):
+            resolved = live_target(binding, current_source, store.objects)
+            if resolved is not None:
+                live[i] = resolved
     new_events = store.manifest["events"][len(old_events):]
+
+    def coverage_ranges(path, bindings_map, locations):
+        ranges = []
+        for i, binding in bindings_map.items():
+            if binding["status"] not in ("active", "unresolved"):
+                continue
+            if i in locations:
+                loc = locations[i]
+                if loc["path"] == path:
+                    ranges.append((loc["start"], loc["end"]))
+            elif binding["target"]["path"] == path:
+                ranges.append((binding["target"]["start"], binding["target"]["end"]))
+        return sorted(ranges)
+
+    def range_covered(a, z, ranges):
+        cursor = a
+        point_covered = False
+        for start, end in ranges:
+            if start <= cursor <= end:
+                point_covered = True
+                cursor = max(cursor, end)
+        return not (cursor < z or (a == z and not point_covered))
+
     for event_id in new_events:
         event = store.events[event_id]
         changes = event["changes"]
         paths = [c["path"] for c in changes]
         if len(paths) != len(set(paths)):
             store.error("EVENT_PATH", event_id, "duplicate changed path")
-        affected = {}
-        # Any edit in a bound file requires explicit continuity for all its bindings:
-        # whole-file snapshot identity changes even when byte intervals do not overlap.
-        for i, binding in current_bindings.items():
-            if binding["status"] in ("active", "unresolved") and binding["target"]["path"] in paths:
-                affected[i] = binding
+        # Only ranges that touch a changed interval require explicit transitions.
+        # Unrelated bindings in the same file stay pinned; coordinates advance by
+        # deterministic equal-region mapping when the edit is unambiguous.
+        affected = affected_by_changes(current_bindings, changes, current_source, store.objects)
+        before_live = {i: dict(loc) for i, loc in live.items()}
+        revised_live = set()
         transitions = event["intent_transitions"]
         seen = set()
         for transition in transitions:
@@ -522,37 +670,73 @@ def validate(entries, base_entries=None):
             if kind == "binding" and not any(t["binding_id"] == i for t in transitions):
                 store.error("MISSING_TRANSITION", event_id, f"{i}: binding revision requires explicit action")
             current[i] = value
+            if kind == "binding":
+                revised_live.add(i)
+                if value["status"] in ("active", "unresolved"):
+                    # Owned successors define the assessed target for this event.
+                    live[i] = {"path": value["target"]["path"], "start": value["target"]["start"],
+                               "end": value["target"]["end"], "mode": value["target"]["mode"],
+                               "content": store.objects[value["target"]["source"]][value["target"]["start"]:value["target"]["end"]]}
+                else:
+                    live.pop(i, None)
         for change in changes:
             path = change["path"]
-            if ref(current_source.get(path)) != change["before"]:
+            before_entry = current_source.get(path)
+            if ref(before_entry) != change["before"]:
                 store.error("SOURCE_CHAIN", event_id, f"{path}: before snapshot does not match preceding state")
+            after_entry = None if change["after"] is None else store.entry(change["after"])
+            before_ranges = coverage_ranges(path, affected if event["provenance"] == "known" else current_bindings, before_live)
+            # Advance live coordinates for unaffected bindings; overlapping ranges already
+            # required an explicit successor whose live entry was installed above.
+            for b, loc in list(live.items()):
+                if loc["path"] != path or b in affected or b in revised_live:
+                    continue
+                mapped = map_preserved_range(loc["start"], loc["end"], before_entry, after_entry)
+                if mapped is None:
+                    store.error("EVENT_TARGET", event_id, f"{b}: unaffected range could not be uniquely relocated; rebind explicitly")
+                    live.pop(b, None)
+                    continue
+                live[b] = {**loc, "start": mapped[0], "end": mapped[1],
+                           "mode": after_entry[0] if after_entry else loc["mode"]}
             if change["after"] is None:
                 current_source.pop(path, None)
             else:
-                current_source[path] = store.entry(change["after"])
-            if event["provenance"] == "known":
-                # Unknown is mandatory unless binding ranges cover ALL changed bytes.
-                for interval in change["intervals"]:
-                    for side, bindings in (("before", affected), ("after", current_bindings)):
-                        if change[side] is None:
-                            continue
-                        a, z = interval[side]
-                        ranges = sorted((b["target"]["start"], b["target"]["end"]) for b in bindings.values()
-                                        if b["status"] in ("active", "unresolved") and b["target"]["path"] == path)
-                        cursor = a
-                        point_covered = False
-                        for start, end in ranges:
-                            if start <= cursor <= end:
-                                point_covered = True
-                                cursor = max(cursor, end)
-                        if cursor < z or (a == z and not point_covered):
-                            store.error("UNKNOWN_PROVENANCE", event_id, f"{path}: {side} [{a},{z}) lacks known intent; declare unknown provenance")
+                current_source[path] = after_entry
+            after_ranges = coverage_ranges(path, current_bindings, live)
+            # Known provenance still requires both sides covered. Unknown may leave
+            # unbound legacy before-bytes uncovered, but newly introduced after-bytes
+            # always need at least one active binding so unknown cannot mint free code.
+            for interval in change["intervals"]:
+                if event["provenance"] == "known":
+                    if change["before"] is not None:
+                        a, z = interval["before"]
+                        if not range_covered(a, z, before_ranges):
+                            store.error("UNKNOWN_PROVENANCE", event_id, f"{path}: before [{a},{z}) lacks known intent; declare unknown provenance")
+                    if change["after"] is not None:
+                        a, z = interval["after"]
+                        if not range_covered(a, z, after_ranges):
+                            store.error("UNKNOWN_PROVENANCE", event_id, f"{path}: after [{a},{z}) lacks known intent; declare unknown provenance")
+                else:
+                    if change["after"] is None:
+                        continue
+                    # Mode-only transitions keep identical bytes; they do not introduce code.
+                    if (change["before"] is not None and
+                            change["before"]["source"] == change["after"]["source"]):
+                        continue
+                    a, z = interval["after"]
+                    if a == z:
+                        continue
+                    if not range_covered(a, z, after_ranges):
+                        store.error("NEW_CODE_REQUIRES_INTENT", event_id,
+                                    f"{path}: after [{a},{z}) introduces unbound bytes; bind an intent (unknown provenance covers legacy before-bytes only)")
         for b, binding in current_bindings.items():
             if binding["status"] not in ("active", "unresolved"):
                 continue
-            target = binding["target"]
-            if ref(current_source.get(target["path"])) != {"source": target["source"], "mode": target["mode"]}:
-                store.error("EVENT_TARGET", event_id, f"{b}: active target must match source at this event, not only the final commit")
+            loc = live.get(b) or live_target(binding, current_source, store.objects)
+            if loc is None:
+                store.error("EVENT_TARGET", event_id, f"{b}: active target must remain uniquely preserved or explicitly rebound at this event")
+            else:
+                live[b] = loc
             governing = current_intents.get(binding["intent_id"])
             if governing and governing["status"] != "active":
                 store.error("EVENT_LIFECYCLE", event_id, f"{b}: end applicability when retiring/superseding intent")

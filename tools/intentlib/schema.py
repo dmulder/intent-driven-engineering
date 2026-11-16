@@ -27,12 +27,16 @@ INTERVAL = obj({"before": POINT, "after": POINT})
 TARGET = obj({"path": TEXT, "start": N, "end": N, "source": HASH,
               "mode": REF["properties"]["mode"]})
 ACTIONS = ["preserve", "modify", "supersede", "retire", "unapply", "rebind", "introduce"]
+VERIFICATION_STATUS = {"type": "string", "enum": ["declared", "pending", "verified", "failed", "unverifiable"]}
+VERIFICATION = obj({"status": VERIFICATION_STATUS, "method": TEXT, "evidence": TEXT}, required=["status"])
 TRANSITION = obj({"intent_id": ID, "binding_id": {"type": ["string", "null"]},
                   "action": {"type": "string", "enum": ACTIONS},
                   "from_revision": NULLREV, "to_revision": NULLREV,
                   "binding_revisions": arr(REV)})
 COMMON = {"schema_version": VERSION, "id": ID, "revision": REV,
           "previous_hash": NULLS, "created_by_event": ID, "content_hash": HASH}
+BINDING_REQUIRED = list(COMMON) + ["intent_id", "intent_revision", "relationship", "status",
+                                   "target", "rationale", "predecessors"]
 SCHEMAS = {
     "intent": obj({**COMMON, "status": {"type": "string", "enum": ["active", "retired", "superseded"]},
         "kind": TEXT, "title": TEXT, "description": TEXT, "rationale": TEXT,
@@ -41,7 +45,8 @@ SCHEMAS = {
         "relationship": {"type": "string", "enum": ["implements", "constrained-by", "motivated-by", "preserves", "verifies", "historically-derived-from"]},
         "status": {"type": "string", "enum": ["active", "ended", "unresolved", "historical"]},
         "target": TARGET, "rationale": TEXT,
-        "predecessors": arr(ID)}),
+        "predecessors": arr(ID),
+        "verification": VERIFICATION}, required=BINDING_REQUIRED),
     "event": obj({"schema_version": VERSION, "id": ID, "kind": TEXT,
         "description": TEXT, "rationale": TEXT,
         "changes": arr(obj({"path": TEXT,

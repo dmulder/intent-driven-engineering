@@ -33,7 +33,7 @@ V1 deliberately implements explicit binding continuity rather than persistent fr
 
 A binding revision can move its target; `predecessors` on new bindings represent copy/split/consolidation lineage. Several successors may name one predecessor, or one successor may name several. End old applicability explicitly where appropriate. Retaining an old active binding is an explicit representation of copying rather than moving.
 
-All bindings in a changed file require new snapshots and explicit declarations, even when an edit occurs elsewhere. This is conservative and noisy, but deterministic and safe against silent positional drift. A future mapping engine may suggest successor ranges; declarations must remain authoritative.
+Only bindings whose live ranges overlap a changed interval require explicit declarations and successor revisions. Unrelated bindings may keep older snapshot pins when equal-region mapping uniquely preserves their bytes; that mapping is coordinate maintenance, not an identity claim. Ambiguous transformations still require authoritative `rebind` declarations.
 
 ## Why separate records?
 

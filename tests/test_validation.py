@@ -60,7 +60,7 @@ class ValidationTests(RepoTest):
         self.git("add", "auth.py")
         self.capture("partial")
         self.write("auth.py", "unstaged unrelated version\n")
-        self.finish("partial", commit=False)
+        self.finish("partial", commit=False, cover=True)
         self.assertTrue(self.ctl("validate", "--staged")["valid"])
         self.assertFalse(self.ctl("validate", ok=False)["valid"])
         self.commit("partial source")
@@ -70,11 +70,11 @@ class ValidationTests(RepoTest):
         self.write("auth.py", "intermediate\n")
         self.git("add", "auth.py")
         self.capture("first")
-        self.finish("first", commit=False)
+        self.finish("first", commit=False, cover=True)
         self.write("auth.py", "final\n")
         self.git("add", "auth.py")
         self.capture("second")
-        self.finish("second")
+        self.finish("second", cover=True)
         history = self.ctl("history", "auth.py:1")
         self.assertEqual(len(history["events"]), 2)
         self.assertEqual(len(self.read(".intent/manifests/current.json")["events"]), 2)
@@ -84,7 +84,7 @@ class ValidationTests(RepoTest):
         self.write("empty.txt", b"")
         self.git("add", ".")
         self.capture("new")
-        self.finish("new")
+        self.finish("new", cover=True)
         self.assertTrue(self.ctl("validate")["valid"])
 
     def test_deterministic_validation(self):
@@ -107,11 +107,55 @@ class ValidationTests(RepoTest):
         draft = self.capture("character")
         intervals = self.read(draft)["event"]["changes"][0]["intervals"]
         self.assertEqual(intervals, [{"before": [86, 87], "after": [86, 87]}])
-        self.finish("character")
+        self.finish("character", cover=True)
         self.write("auth.py", "def authenticate(user, token):\n    return token.valid\n")
         self.git("add", "auth.py")
         self.capture("multiline")
-        self.finish("multiline")
+        self.finish("multiline", cover=True)
+
+    def test_unknown_provenance_rejects_unbound_new_bytes(self):
+        self.write("auth.py", "brand new implementation\n")
+        self.git("add", "auth.py")
+        self.capture("escape")
+        result = self.ctl("finalize", "escape", ok=False)
+        self.assertIn("NEW_CODE_REQUIRES_INTENT", {e["code"] for e in result["errors"]})
+
+    def test_unrelated_binding_survives_without_rebind(self):
+        self.write("auth.py", "HEAD\nTAIL\n")
+        self.git("add", "auth.py")
+        self.capture("seed")
+        head_i, head_b = self.introduce("head", path="auth.py", start=0, end=5, event="seed")
+        tail_i, tail_b = self.introduce("tail", path="auth.py", start=5, end=10, event="seed")
+        self.finish("seed")
+        self.write("auth.py", "HEAD\nTAIL!\n")
+        self.git("add", "auth.py")
+        draft = self.capture("tail-edit")
+        required = {item["binding_id"] for item in self.read(draft)["required_declarations"]}
+        self.assertEqual(required, {tail_b})
+        self.preserve("tail-edit", tail_i, tail_b, start=5, end=11,
+                      verification_status="pending")
+        self.finish("tail-edit")
+        explain = self.ctl("explain", "auth.py:1")
+        self.assertEqual({item["binding"]["id"] for item in explain["applicable"]}, {head_b})
+        self.assertFalse(explain["applicable"][0]["target_matches"])
+        self.assertEqual(explain["applicable"][0]["live_target"]["end"], 5)
+        tail = self.ctl("show-binding", tail_b)
+        self.assertEqual(tail["verification"]["status"], "pending")
+
+    def test_verified_binding_requires_evidence(self):
+        i, b = self.bound()
+        self.capture("verify")
+        self.ctl("rebind", b, "--event", "verify", "--rationale", "Claim verified without evidence",
+                 "--verification-status", "verified")
+        self.ctl("declare", "--event", "verify", "--intent", i, "--binding", b, "--action", "rebind")
+        result = self.ctl("finalize", "verify", ok=False)
+        self.assertIn("VERIFICATION", {e["code"] for e in result["errors"]})
+
+    def test_schema_definition_pin_is_proposed_only(self):
+        from intentlib.core import Store, snapshot
+        base = snapshot(self.root, revision="HEAD")
+        # Base schemas may predate the running validator during a schema upgrade.
+        self.assertEqual(Store(base, enforce_schema_definitions=False).errors, [])
 
     def test_capture_does_not_declare_preservation(self):
         i, b = self.bound()
