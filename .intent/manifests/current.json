@@ -1,1 +1,1 @@
-{"bindings":{},"events":[],"intents":{},"schema_version":1}
+{"bindings":{"B-79514fb8970600c58b6a903fa8056e476ac1a5000a5541a2594beae5494fbd0c":1,"B-e3fb2acfa58f4b496a98e4627c44214423dcb635ab0604eecb8b4eca00cf044b":1},"events":["E-35d45b2415c90ab0feabf01ff220649c39445260f0f1408e9de91568aac1219c"],"intents":{"I-710286ea6ee668b9ae97e5275011a4ec5d694f2625ff192229960b44bd6a90c0":1},"schema_version":1}
