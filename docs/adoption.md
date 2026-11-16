@@ -24,7 +24,7 @@ introduce intents and bindings through normal metadata-only events. State whethe
 the rationale comes from a human requirement, written evidence, or an inference.
 Record remaining uncertainty explicitly in rationale and verification evidence.
 `report` and `report --json` expose both recorded rationale and unbound byte counts.
-Binding coverage is structural; even a fully bound file may have false rationale.
+Reports include resolved current locations and explicitly labeled historical pins with snapshot IDs. A missing live target is shown as unavailable, never as a current location. Binding coverage is structural; even a fully bound file may have false rationale.
 
 ## Changes without intent updates
 
@@ -37,8 +37,24 @@ rather than reporting a clean audit. Shallow history is rejected. `--since BASE`
 restricts historical checks to commits after an explicitly selected ancestor;
 use a trusted checkpoint, since earlier gaps are outside that scope.
 
+Historical `SCHEMA_DEFINITION` pin mismatches appear in `historical_schema_drift`,
+an informational category: reinstalling an engine must not label an old schema pin
+as a bad source change. The audit still checks those records and transitions with
+the running engine's trusted schemas; it never executes historical repository code
+or trusts a repository-provided schema. Other structural errors remain failures.
+Current worktree/staged validation and commit/push enforcement keep strict schema
+pinning. This is a compatibility audit, not certification by each historical engine.
+Outdated intent assessments still need review even when no structural errors remain.
+
 `watch` polls in the foreground and emits only changed reports. It does not stage,
-commit, run agents, or repair metadata. `watch --once` performs one check.
+commit, run agents, or repair metadata. Each watcher caches immutable commit results
+and its last exact worktree/metadata snapshot in memory under the loaded engine.
+New HEADs, source, metadata, or merge state invalidate the relevant cached result;
+restarting the process clears the cache. No cache is written into the repository.
+The interval is a delay after each completed audit, not a fixed polling deadline;
+the initial scan and changed snapshots may still be expensive. Transient read/Git
+errors are emitted as attention states and retried on the next tick.
+`watch --once` performs one check and exits nonzero for an error.
 `reconcile` emits the audit and an agent task: inspect evidence, propose explicit
 transitions, validate, and present the reasons for review. It can run on a machine
 without any AI provider configured. Callers choose which agent consumes the JSON.
@@ -66,6 +82,11 @@ dispatchers retain original hooks, honor hooksPath, and invoke the installed eng
 without assuming a `tools/` directory in the target repository. Reinstalling in the
 same prefix upgrades the engine; `deploy --update` separately updates a managed
 protocol, leaving the repository's committed instructions under its review policy.
+Uninstall warns before deleting files. Orphaned strict hooks fail closed with the
+missing engine/interpreter path and a recovery instruction: reinstall at the same
+prefix, then run `intentctl uninstall-hooks` in each affected repository. There is
+no global inventory of adopted repositories, so uninstall cannot safely find and
+rewrite every repository's hooks.
 
 Local hooks and local installed tools are convenience enforcement. Trusted CI must
 use a reviewed tool version. Structural validation cannot prove intent truthfulness;

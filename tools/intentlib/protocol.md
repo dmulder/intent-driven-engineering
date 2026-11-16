@@ -24,7 +24,7 @@ Code, intents, bindings, and events have independent identities and histories. G
 3. Use `intent-create`, `intent-revise`, `bind`, and `rebind` with `--event CHANGE`, or edit the draft directly. Complete all required transition declarations and record verification. Every affected binding needs its own declaration; capture never supplies preserve automatically. Unknown provenance may cover unbound legacy before-bytes only; after-bytes always need at least one binding.
 4. Run `intentctl finalize CHANGE`. Preserve all committed records. For additional logical events, stage the next source state and capture with another key; snapshots retain intermediate states.
 5. Run `intentctl validate` against the working tree. Then stage code AND `.intent` metadata and run `intentctl validate --staged`.
-6. Correct every failure before committing. Run `python3 -m unittest discover -s tests -v` for tool changes. Hooks are an additional check, not a substitute for these steps.
+6. Correct every failure before committing. Run the repository's own test suite and required checks, following its local instructions. Hooks are an additional check, not a substitute for these steps.
 
 ## Investigation, repair, and failure
 

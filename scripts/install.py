@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 import tempfile
@@ -25,9 +26,10 @@ def main():
             raise RuntimeError('installation paths are symlinks; reconcile manually')
         if package.exists() and not (package / '.intentctl-install').is_file():
             raise RuntimeError(f'refusing to replace unmanaged directory {package}')
-        if launcher.exists() and MARKER not in launcher.read_text():
+        if launcher.exists() and MARKER.encode() not in launcher.read_bytes():
             raise RuntimeError(f'refusing to replace unmanaged command {launcher}')
         if args.uninstall:
+            print(f'Warning: hooks may still reference {package}. Reinstall at this prefix to run intentctl uninstall-hooks in each adopted repository.', file=sys.stderr, flush=True)
             if launcher.exists():
                 launcher.unlink()
             if package.exists():
@@ -55,14 +57,19 @@ def main():
                 if backup.exists():
                     backup.rename(package)
                 raise
-        text = ('#!' + sys.executable + '\n' + MARKER + '\nimport sys\n'
-                + 'sys.path.insert(0, ' + repr(str(package)) + ')\n'
-                + 'from intentlib.cli import main\nraise SystemExit(main())\n')
+        # A shebang cannot quote an interpreter path containing whitespace.
+        # The entry point imports its adjacent private intentlib package.
+        text = ('#!/bin/sh\n' + MARKER + '\nexec '
+                + shlex.join([sys.executable, str(package / 'intentctl.py')])
+                + ' "$@"\n')
         descriptor, temporary = tempfile.mkstemp(prefix='.intentctl-', dir=launcher.parent)
-        with os.fdopen(descriptor, 'w') as stream:
-            stream.write(text)
-        Path(temporary).chmod(0o755)
-        os.replace(temporary, launcher)
+        try:
+            with os.fdopen(descriptor, 'w') as stream:
+                stream.write(text)
+            Path(temporary).chmod(0o755)
+            os.replace(temporary, launcher)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         print(f'Installed {launcher}\nAdd {launcher.parent} to PATH if needed. Requires Git and Python 3.10+.')
         return 0
     except (OSError, RuntimeError) as exc:

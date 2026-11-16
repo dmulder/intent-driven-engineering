@@ -18,7 +18,7 @@ from .schema import ACTIONS, SCHEMAS, check, published
 def output(value, as_json=False):
     if as_json:
         print(canonical(value).decode())
-    elif isinstance(value, dict) and "errors" in value:
+    elif isinstance(value, dict) and "errors" in value and "valid" in value:
         print("valid" if value["valid"] else "invalid")
         for error in value["errors"]:
             print(f"{error['code']} {error['path']}: {error['message']}")
@@ -65,7 +65,11 @@ def install_hooks(root, uninstall=False):
     directory = Path(raw) if Path(raw).is_absolute() else root / raw
     directory.mkdir(parents=True, exist_ok=True)
     marker = "# intentctl managed dispatcher v1"
-    runner = shlex.join([sys.executable, str(Path(__file__).resolve().parents[1] / "intentctl.py")])
+    engine = str(Path(__file__).resolve().parents[1] / "intentctl.py")
+    runner = shlex.join([sys.executable, engine])
+    missing = shlex.quote(f'intentctl is unavailable at {engine} (Python: {sys.executable}); reinstall at the same prefix, then run intentctl uninstall-hooks in this repository if removing it.')
+    availability = (f'if [ ! -x {shlex.quote(sys.executable)} ] || [ ! -r {shlex.quote(engine)} ]; then\n'
+                    f'  printf "%s\\n" {missing} >&2\n  exit 1\nfi\n')
     for name in ("pre-commit", "pre-push"):
         path = directory / name
         backup = directory / (name + ".intentctl-original")
@@ -95,7 +99,7 @@ def install_hooks(root, uninstall=False):
             chain = ('input=$(mktemp) || exit 1\ntrap \'rm -f "$input"\' EXIT HUP INT TERM\ncat > "$input"\n'
                      'if [ -x "$original" ]; then "$original" "$@" < "$input" || exit $?; fi\n')
         text = ('#!/bin/sh\n' + marker + '\nroot=$(git rev-parse --show-toplevel) || exit 1\n'
-                'original="$0.intentctl-original"\n' + chain + body)
+                'original="$0.intentctl-original"\n' + chain + availability + body)
         path.write_text(text)
         path.chmod(0o755)
 
@@ -346,7 +350,7 @@ def finalize(root, args):
     return {"event": event["id"], "records": event["records"], "next": "stage .intent and run validate --staged"}
 
 
-def validate_commit(root, commit):
+def validate_commit(root, commit, *, enforce_schema_definitions=True):
     parents = git(root, "rev-list", "--parents", "-n", "1", commit).decode().split()[1:]
     after = snapshot(root, revision=commit)
     if ".intent/config.json" not in after:
@@ -356,7 +360,7 @@ def validate_commit(root, commit):
     if len(parents) > 1:
         return [{"code": "MERGE_UNSUPPORTED", "path": commit, "message": "merge commits are unsupported; rebase or squash and reconcile metadata explicitly"}]
     before = snapshot(root, revision=parents[0]) if parents else {}
-    return validate(after, before)
+    return validate(after, before, enforce_schema_definitions=enforce_schema_definitions)
 
 
 def run_validation(root, args):
@@ -617,9 +621,16 @@ def main(argv=None):
                 if not math.isfinite(args.interval) or args.interval <= 0:
                     raise IntentError("--interval must be a positive finite number")
                 previous = None
+                cache = {}
                 try:
                     while True:
-                        result = audit(root, args.since)
+                        try:
+                            result = audit(root, args.since, cache=cache)
+                        except ValidationError as exc:
+                            result = {"needs_attention": True, "valid": False, "errors": exc.errors}
+                        except (IntentError, OSError, KeyError, IndexError) as exc:
+                            result = {"needs_attention": True, "valid": False, "errors": [
+                                {"code": "OPERATION", "path": ".intent", "message": str(exc)}]}
                         fingerprint = canonical(result)
                         if fingerprint != previous:
                             output(result, args.json)

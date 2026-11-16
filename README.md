@@ -91,7 +91,11 @@ Unknown legacy coverage is reported as an adoption backlog and alone does not fa
 an audit. Untracked files, local changes, invalid committed transitions, unresolved
 bindings, and outdated intent assessments need attention. Default audits scan all
 reachable history; `--since` explicitly narrows that scope. Shallow clones must fetch
-full history. `watch` is a foreground process, not a daemon or model invocation.
+full history. Historical schema-pin drift is reported separately from structural
+failures; current snapshots still require the running validator's published schemas.
+`watch` caches prior commit results and unchanged snapshots in memory, retries
+transient errors, and waits the interval after each completed scan. Its initial scan
+can be expensive. It is a foreground process, not a daemon or model invocation.
 
 Human edits may omit intent updates or bypass hooks. Monitoring detects structural
 gaps without approving explanations. Agents review diffs, tests, and human context,

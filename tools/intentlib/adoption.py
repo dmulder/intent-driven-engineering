@@ -1,12 +1,19 @@
 """Deployment and read-only adoption reports. Never infer or approve intent."""
 from pathlib import Path
 
-from .core import IntentError, Store, git, head, live_target, snapshot, source
+from .core import IntentError, ValidationError, Store, canonical, digest, git, head, live_target, ref, snapshot, source
 
 START = '<!-- intentctl:begin -->'
 END = '<!-- intentctl:end -->'
 LINK = START + '\nRead [INTENT.md](INTENT.md) before investigating or changing this repository.\n' + END
 PROTOCOL = Path(__file__).with_name('protocol.md')
+
+
+def instruction_text(path):
+    try:
+        return path.read_bytes().decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise IntentError(f'{path.name} is not valid UTF-8; reconcile manually') from exc
 
 
 def deployment_plan(root, update=False):
@@ -17,23 +24,27 @@ def deployment_plan(root, update=False):
         if path.is_symlink():
             raise IntentError(f'refusing instruction write through symlink: {name}')
     agents = root / 'AGENTS.md'
-    text = agents.read_bytes().decode('utf-8') if agents.exists() else ''
+    text = instruction_text(agents) if agents.exists() else ''
+    crlf = text.count('\r\n')
+    newline = '\r\n' if crlf > text.count('\n') - crlf else '\n'
+    link = LINK.replace('\n', newline)
     if START in text or END in text:
         if text.count(START) != 1 or text.count(END) != 1 or text.index(START) > text.index(END):
             raise IntentError('ambiguous intentctl block in AGENTS.md; reconcile manually')
         a, z = text.index(START), text.index(END) + len(END)
-        revised = text[:a] + LINK + text[z:]
+        revised = text[:a] + link + text[z:]
     else:
-        revised = text + ('\n\n' if text and not text.endswith('\n\n') else '') + LINK + '\n'
+        separator = '' if not text or text.endswith(newline * 2) else (newline if text.endswith(newline) else newline * 2)
+        revised = text + separator + link + newline
     if revised != text:
         writes['AGENTS.md'] = revised
     protocol = root / 'INTENT.md'
-    desired = PROTOCOL.read_bytes().decode('utf-8')
-    if protocol.exists() and protocol.read_bytes().decode('utf-8') != desired:
-        current = protocol.read_bytes().decode('utf-8')
+    desired = instruction_text(PROTOCOL)
+    current = instruction_text(protocol) if protocol.exists() else None
+    if current is not None and current != desired:
         if not update or not current.startswith(START + '\n') or not current.rstrip().endswith(END):
             raise IntentError('INTENT.md already exists; preserve it or use deploy --update for an intentctl-managed file')
-    if not protocol.exists() or protocol.read_bytes().decode('utf-8') != desired:
+    if current != desired:
         writes['INTENT.md'] = desired
     return writes
 
@@ -45,23 +56,29 @@ def deploy(root, update=False):
     return {'deployed': sorted(writes), 'next': 'review and stage AGENTS.md and INTENT.md; account for changes normally after adoption'}
 
 
-def review_state(root):
+def review_state(root, entries=None):
     """Read canonical records and expose incomplete coverage without inventing motives."""
-    entries = snapshot(root, working=True)
+    entries = snapshot(root, working=True) if entries is None else entries
     store = Store(entries)
     if store.errors:
-        raise IntentError(str(store.errors))
+        raise ValidationError(store.errors)
     intents, bindings = store.current('intent'), store.current('binding')
     regions = {}
+    binding_views = []
+    current_source = source(entries)
     reassessment, unresolved = [], []
     for binding in bindings.values():
+        live = (live_target(binding, current_source, store.objects)
+                if binding['status'] in ('active', 'unresolved') else None)
+        # Derived query data: canonical targets remain pinned to their snapshots.
+        binding_views.append({**binding, 'live_target': (
+            {key: live[key] for key in ('path', 'start', 'end', 'mode')} if live else None)})
         if binding['status'] not in ('active', 'unresolved'):
             continue
         if binding['status'] == 'unresolved':
             unresolved.append(binding['id'])
         if binding['intent_revision'] != store.manifest['intents'].get(binding['intent_id']):
             reassessment.append(binding['id'])
-        live = live_target(binding, source(entries), store.objects)
         if live:
             regions.setdefault(live['path'], []).append((live['start'], live['end']))
     backlog = []
@@ -73,12 +90,12 @@ def review_state(root):
         if covered < len(data) or path not in regions:
             backlog.append({'path': path, 'unbound_bytes': len(data) - covered,
                             'provenance': 'unknown; observed behavior is not established intent'})
-    return {'intents': list(intents.values()), 'bindings': list(bindings.values()),
+    return {'intents': list(intents.values()), 'bindings': binding_views,
             'adoption_backlog': backlog, 'reassessment': sorted(reassessment),
             'unresolved': sorted(unresolved)}
 
 
-def audit(root, since=None):
+def audit(root, since=None, cache=None):
     # Import here to keep the existing engine independent of the adoption layer.
     from .cli import validate_commit
     tip = head(root)
@@ -97,24 +114,55 @@ def audit(root, since=None):
     initialized = (root / '.intent/config.json').is_file()
     result = {'repository': str(root), 'head': tip, 'initialized': initialized,
               'working_changes': changes, 'history_scope': f'{since}..HEAD' if since else 'all reachable history',
-              'errors': [], 'adoption_backlog': [], 'reassessment': [], 'unresolved': []}
+              'errors': [], 'historical_schema_drift': [], 'adoption_backlog': [], 'reassessment': [], 'unresolved': []}
     # Missing ancestors could conceal skipped human commits; never report a full audit.
     if git(root, 'rev-parse', '--is-shallow-repository').strip() == b'true':
         raise IntentError('history audit requires full history; fetch --unshallow before audit')
+    rev_range = tip
     if since:
         base = git(root, 'rev-parse', '--verify', since + '^{commit}').decode().strip()
-        git(root, 'merge-base', '--is-ancestor', base, 'HEAD')
+        if git(root, 'merge-base', base, 'HEAD', ok=(0, 1)).decode().strip() != base:
+            raise IntentError(f'--since {since} is not an ancestor of HEAD')
+        rev_range = f'{base}..HEAD'
+    # Cache only in this process: loaded engine/schema definitions are fixed.
+    cache = {} if cache is None else cache
+    commits_cache = cache.setdefault('commits', {})
     if tip:
-        commits = git(root, 'rev-list', '--reverse', '--topo-order', f'{base}..HEAD' if since else tip).decode().split()
+        commits = git(root, 'rev-list', '--reverse', '--topo-order', rev_range).decode().split()
         for commit in commits:
-            result['errors'].extend({**error, 'commit': commit} for error in validate_commit(root, commit))
+            if commit not in commits_cache:
+                errors = validate_commit(root, commit)
+                drift = [e for e in errors if e['code'] == 'SCHEMA_DEFINITION']
+                if drift:
+                    # A pin error short-circuits ordinary validation. Recheck
+                    # records/transitions with trusted current schemas so drift
+                    # cannot conceal unrelated corruption or missing events.
+                    errors = drift + validate_commit(root, commit, enforce_schema_definitions=False)
+                commits_cache[commit] = errors
+            for error in commits_cache[commit]:
+                # Do not execute an old repository's engine. Only historical pin
+                # mismatches are informational; all other structural errors fail.
+                category = 'historical_schema_drift' if error['code'] == 'SCHEMA_DEFINITION' else 'errors'
+                result[category].append({**error, 'commit': commit})
     if not initialized:
         result.update(needs_attention=True, next='review missing initialization and any history errors; init is for repositories without prior adoption')
         return result
-    state = review_state(root)
+    entries = snapshot(root, working=True)
+    fingerprint = digest(canonical({p: ref(entry) for p, entry in entries.items()}))
+    result['state_fingerprint'] = fingerprint
+    state = review_state(root, entries)
     from argparse import Namespace
     from .cli import run_validation
-    pending = run_validation(root, Namespace(push=False, range=None, commit=None, base=None, staged=False))
+    merge = git(root, 'rev-parse', '-q', '--verify', 'MERGE_HEAD', ok=(0, 1, 128))
+    working_key = (tip, fingerprint, merge)
+    if cache.get('working', (None,))[0] == working_key:
+        pending = cache['working'][1]
+    else:
+        pending = run_validation(root, Namespace(push=False, range=None, commit=None, base=None, staged=False))
+        after = snapshot(root, working=True)
+        if digest(canonical({p: ref(entry) for p, entry in after.items()})) != fingerprint:
+            raise IntentError('repository changed while auditing; retry after writes complete')
+        cache['working'] = (working_key, pending)
     result['errors'].extend(pending['errors'])
     result.update({k: state[k] for k in ('adoption_backlog', 'reassessment', 'unresolved')})
     result['needs_attention'] = bool(result['errors'] or changes or state['reassessment'] or state['unresolved'])
@@ -145,7 +193,15 @@ def report(root):
         for binding in state['bindings']:
             if binding['intent_id'] == intent['id']:
                 t = binding['target']
-                lines += [f"- {t['path']} bytes {t['start']}..{t['end']}: {binding['status']}; intent revision {binding['intent_revision']}; verification {binding.get('verification', {}).get('status', 'declared')}"]
+                pinned = f"pinned snapshot {t['source']}: {t['path']} bytes {t['start']}..{t['end']}"
+                live = binding['live_target']
+                if live:
+                    location = f"current: {live['path']} bytes {live['start']}..{live['end']}; {pinned}"
+                elif binding['status'] in ('active', 'unresolved'):
+                    location = f"current location unavailable; {pinned}"
+                else:
+                    location = f"historical {pinned}"
+                lines += [f"- {location}: {binding['status']}; intent revision {binding['intent_revision']}; verification {binding.get('verification', {}).get('status', 'declared')}"]
         lines += ['']
     lines += ['## Unknown provenance / adoption backlog', '']
     lines += [f"- {item['path']}: {item['unbound_bytes']} unbound bytes" for item in state['adoption_backlog']]
