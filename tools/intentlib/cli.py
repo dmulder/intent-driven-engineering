@@ -82,12 +82,11 @@ def install_hooks(root, uninstall=False):
                 if backup.exists():
                     backup.rename(path)
             continue
-        if managed:
-            continue
-        if backup.exists():
-            raise IntentError(f"ambiguous hook backup {backup}; reconcile manually")
-        if path.exists():
-            path.rename(backup)
+        if not managed:
+            if backup.exists():
+                raise IntentError(f"ambiguous hook backup {backup}; reconcile manually")
+            if path.exists():
+                path.rename(backup)
         # Resolve repository at execution time, including linked worktrees.
         # The original hook runs first and receives the same arguments/stdin.
         if name == "pre-commit":
@@ -100,7 +99,8 @@ def install_hooks(root, uninstall=False):
                      'if [ -x "$original" ]; then "$original" "$@" < "$input" || exit $?; fi\n')
         text = ('#!/bin/sh\n' + marker + '\nroot=$(git rev-parse --show-toplevel) || exit 1\n'
                 'original="$0.intentctl-original"\n' + chain + availability + body)
-        path.write_text(text)
+        if not path.exists() or path.read_text(errors="replace") != text:
+            path.write_text(text)
         path.chmod(0o755)
 
 

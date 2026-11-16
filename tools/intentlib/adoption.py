@@ -42,7 +42,7 @@ def deployment_plan(root, update=False):
     desired = instruction_text(PROTOCOL)
     current = instruction_text(protocol) if protocol.exists() else None
     if current is not None and current != desired:
-        if not update or not current.startswith(START + '\n') or not current.rstrip().endswith(END):
+        if not update or not current.startswith((START + '\n', START + '\r\n')) or not current.rstrip().endswith(END):
             raise IntentError('INTENT.md already exists; preserve it or use deploy --update for an intentctl-managed file')
     if current != desired:
         writes['INTENT.md'] = desired
@@ -100,30 +100,38 @@ def audit(root, since=None, cache=None):
     from .cli import validate_commit
     tip = head(root)
     raw = git(root, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all')
+    def filename(raw_path):
+        try:
+            return raw_path.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise IntentError('non-UTF-8 filenames are unsupported; rename the affected files using UTF-8 names') from exc
     # Keep Git's NUL-delimited paths intact, including rename source paths.
     changes, rows, index = [], raw.split(b'\0'), 0
     while index < len(rows) and rows[index]:
         row = rows[index]
-        status, path = row[:2].decode(), row[3:].decode('utf-8')
+        status, path = row[:2].decode(), filename(row[3:])
         item = {'status': status, 'path': path}
         index += 1
         if 'R' in status or 'C' in status:
-            item['from'] = rows[index].decode('utf-8')
+            item['from'] = filename(rows[index])
             index += 1
         changes.append(item)
     initialized = (root / '.intent/config.json').is_file()
     result = {'repository': str(root), 'head': tip, 'initialized': initialized,
               'working_changes': changes, 'history_scope': f'{since}..HEAD' if since else 'all reachable history',
-              'errors': [], 'historical_schema_drift': [], 'adoption_backlog': [], 'reassessment': [], 'unresolved': []}
+              'errors': [], 'historical_schema_drift': [], 'adoption_backlog': [], 'reassessment': [], 'unresolved': [],
+              'derived_state_available': False}
     # Missing ancestors could conceal skipped human commits; never report a full audit.
     if git(root, 'rev-parse', '--is-shallow-repository').strip() == b'true':
         raise IntentError('history audit requires full history; fetch --unshallow before audit')
     rev_range = tip
     if since:
+        if tip is None:
+            raise IntentError('--since requires a committed HEAD')
         base = git(root, 'rev-parse', '--verify', since + '^{commit}').decode().strip()
-        if git(root, 'merge-base', base, 'HEAD', ok=(0, 1)).decode().strip() != base:
+        if git(root, 'merge-base', base, tip, ok=(0, 1)).decode().strip() != base:
             raise IntentError(f'--since {since} is not an ancestor of HEAD')
-        rev_range = f'{base}..HEAD'
+        rev_range = f'{base}..{tip}'
     # Cache only in this process: loaded engine/schema definitions are fixed.
     cache = {} if cache is None else cache
     commits_cache = cache.setdefault('commits', {})
@@ -145,27 +153,40 @@ def audit(root, since=None, cache=None):
                 category = 'historical_schema_drift' if error['code'] == 'SCHEMA_DEFINITION' else 'errors'
                 result[category].append({**error, 'commit': commit})
     if not initialized:
+        if head(root) != tip:
+            raise IntentError('repository changed while auditing; retry after writes complete')
         result.update(needs_attention=True, next='review missing initialization and any history errors; init is for repositories without prior adoption')
         return result
     entries = snapshot(root, working=True)
     fingerprint = digest(canonical({p: ref(entry) for p, entry in entries.items()}))
     result['state_fingerprint'] = fingerprint
-    state = review_state(root, entries)
+    state = None
+    try:
+        state = review_state(root, entries)
+    except ValidationError as exc:
+        # Broken working metadata must not erase already collected history or
+        # prevent reconcile from returning its investigation task packet.
+        result['errors'].extend(exc.errors)
+    result['derived_state_available'] = state is not None
     from argparse import Namespace
     from .cli import run_validation
     merge = git(root, 'rev-parse', '-q', '--verify', 'MERGE_HEAD', ok=(0, 1, 128))
     working_key = (tip, fingerprint, merge)
-    if cache.get('working', (None,))[0] == working_key:
+    cached = cache.get('working', (None,))[0] == working_key
+    if cached:
         pending = cache['working'][1]
     else:
-        pending = run_validation(root, Namespace(push=False, range=None, commit=None, base=None, staged=False))
-        after = snapshot(root, working=True)
-        if digest(canonical({p: ref(entry) for p, entry in after.items()})) != fingerprint:
-            raise IntentError('repository changed while auditing; retry after writes complete')
+        pending = run_validation(root, Namespace(push=False, range=None, commit=None, base=tip, staged=False))
+    # Check cached polls too: neither HEAD nor the working snapshot is locked.
+    after = snapshot(root, working=True)
+    if digest(canonical({p: ref(entry) for p, entry in after.items()})) != fingerprint or head(root) != tip:
+        raise IntentError('repository changed while auditing; retry after writes complete')
+    if not cached:
         cache['working'] = (working_key, pending)
-    result['errors'].extend(pending['errors'])
-    result.update({k: state[k] for k in ('adoption_backlog', 'reassessment', 'unresolved')})
-    result['needs_attention'] = bool(result['errors'] or changes or state['reassessment'] or state['unresolved'])
+    result['errors'].extend(e for e in pending['errors'] if e not in result['errors'])
+    if state is not None:
+        result.update({k: state[k] for k in ('adoption_backlog', 'reassessment', 'unresolved')})
+    result['needs_attention'] = bool(result['errors'] or changes or result['reassessment'] or result['unresolved'])
     result['next'] = 'agent reviews evidence and records explicit intent/binding transitions; never reset the baseline to hide drift'
     return result
 

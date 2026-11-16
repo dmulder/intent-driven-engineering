@@ -37,6 +37,15 @@ rather than reporting a clean audit. Shallow history is rejected. `--since BASE`
 restricts historical checks to commits after an explicitly selected ancestor;
 use a trusted checkpoint, since earlier gaps are outside that scope.
 
+Each audit uses the HEAD captured at its start for both history and working-tree
+validation, and checks that HEAD and the working snapshot remain unchanged before
+returning, including on cached polls. A concurrent commit or edit causes a retry
+diagnostic rather than a report that combines different repository states.
+Invalid working metadata is included alongside any historical errors already
+found. `derived_state_available: false` means the adoption backlog and binding
+assessment lists could not be computed; empty lists then do not imply coverage.
+`reconcile` still returns its task packet for investigating those errors.
+
 Historical `SCHEMA_DEFINITION` pin mismatches appear in `historical_schema_drift`,
 an informational category: reinstalling an engine must not label an old schema pin
 as a bad source change. The audit still checks those records and transitions with
@@ -82,6 +91,10 @@ dispatchers retain original hooks, honor hooksPath, and invoke the installed eng
 without assuming a `tools/` directory in the target repository. Reinstalling in the
 same prefix upgrades the engine; `deploy --update` separately updates a managed
 protocol, leaving the repository's committed instructions under its review policy.
+Run the installed `intentctl init` when migrating from copied tools or changing
+installation paths. It refreshes older managed hook dispatchers while preserving
+the original hook backups and keeping identical dispatchers unchanged. Removing
+tracked copied tools still requires normal source-change accounting.
 Uninstall warns before deleting files. Orphaned strict hooks fail closed with the
 missing engine/interpreter path and a recovery instruction: reinstall at the same
 prefix, then run `intentctl uninstall-hooks` in each affected repository. There is

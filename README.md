@@ -27,6 +27,7 @@ make install                       # default: ~/.local/bin/intentctl
 export PATH="$HOME/.local/bin:$PATH"
 # Optional custom location:
 make install PREFIX="$HOME/opt/intent"
+export PATH="$HOME/opt/intent/bin:$PATH"
 # Or, without make:
 python3 scripts/install.py --prefix "$HOME/.local"
 ```
@@ -72,7 +73,8 @@ Nothing copies this project's canonical intents or source code into your reposit
 Plain `init` also installs strict hooks; use it after gradual adoption when you want
 to require accounting before commits and pushes. Existing hooks and `core.hooksPath`
 are preserved. Repeating init preserves metadata. Hooks invoke the engine at its
-installed location; rerun init after uninstalling hooks if that location changes.
+installed location; rerun init to refresh older managed dispatchers when upgrading
+from copied tools or changing the installation location. Original hook backups remain intact.
 `uninstall-hooks` restores originals. [Hook details](docs/git-integration.md).
 
 ## Monitor human and agent changes
@@ -83,7 +85,7 @@ intentctl audit --since BASE --json # commits after a known ancestor + local sta
 intentctl watch --interval 5 --json # foreground polling; emits changes, Ctrl-C stops
 intentctl watch --once --json       # one poll, useful for integrations
 intentctl reconcile --json          # read-only review context for an agent
-intentctl report > intent-report.md # Markdown for manual review
+intentctl report > /tmp/intent-report.md # Markdown for manual review outside the repo
 ```
 
 `audit`, `watch --once`, and `reconcile` exit 1 when attention is needed, 0 otherwise.
