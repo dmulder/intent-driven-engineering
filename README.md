@@ -1,6 +1,6 @@
-# Intent-native Git overlay
+# Intent-driven engineering tools
 
-An experimental, offline engineering provenance system. Code, intent, bindings, and logical events evolve independently; Git stores consistent snapshots of all four. The CLI and validator use Python's standard library and Git plumbing. No model, server, inline source annotations, or package installation is required.
+Installable, offline tools for adopting intent-driven engineering in existing Git repositories. Agents maintain explicit reasons for changes so other agents can understand the project and humans can review its decisions. Code, intent, bindings, and logical events evolve independently; Git stores consistent snapshots of all four. The CLI and validator use Python's standard library and Git plumbing. No model, server, runtime Python dependencies, or inline source annotations are required. Install once and run `intentctl` from any supported Git repository, including a nested directory.
 
 **Prototype, not semantic verification.** A successful check proves structural accounting, not that an implementation satisfies its declared intent. See [limitations](docs/git-integration.md) before adopting it.
 
@@ -18,44 +18,108 @@ python3 tools/intentctl.py history auth.py:2 --json
 
 The demonstration makes real commits, overlaps two independent intents on one condition, refactors the implementation, revises intent without changing source, updates the implementation, rejects an incomplete commit, then accepts the completed declarations. [Commands and expected output](docs/demonstration.md).
 
-## Install into an existing repository
+## Install once for your user
 
-Copy `tools/intentctl.py` and `tools/intentlib/` into the destination's `tools/` directory without replacing existing files. Copy or merge `AGENTS.md` into its operating instructions. Run from anywhere inside that repository:
+Requires Python 3.10+ and Git; tested on Linux. From a checkout of this project:
 
 ```sh
-git add tools AGENTS.md
-python3 tools/intentctl.py init
-# Stage any other files that belong in the import, then explicitly refresh inventory:
-python3 tools/intentctl.py baseline
-git add .intent
-python3 tools/intentctl.py validate --staged
-git commit -m 'Import intent system with unknown legacy provenance'
+make install                       # default: ~/.local/bin/intentctl
+export PATH="$HOME/.local/bin:$PATH"
+# Optional custom location:
+make install PREFIX="$HOME/opt/intent"
+# Or, without make:
+python3 scripts/install.py --prefix "$HOME/.local"
 ```
 
-The first transaction is an **unknown-provenance baseline only**. Introduce verified intent in a subsequent transaction. All tracked files outside `.intent/` are governed, including documentation, tests, hooks, and this tool. Working-tree validation includes tracked source files and untracked canonical metadata; untracked source must first be staged.
+The installer copies the engine and protocol into `PREFIX/lib/intent-driven-engineering`
+and creates `PREFIX/bin/intentctl`. It needs no root access or network connection and
+continues working after the source checkout is moved. Reinstall to upgrade. Existing
+unmanaged commands are protected. Run `intentctl uninstall-hooks` in adopted repos
+before `make uninstall`; uninstall leaves repository history intact.
 
-`init` creates configuration, schemas, an immutable baseline inventory, a manifest, and hook dispatchers. It preserves existing hooks and respects `core.hooksPath`. Repeating it does not replace metadata. `init --no-hooks` initializes metadata only. `uninstall-hooks` restores original hook files; it does not delete history. [Hook details](docs/git-integration.md).
+## Adopt an existing repository
+
+```sh
+cd /path/to/existing/repository
+intentctl audit --json             # read-only inventory, also works before adoption
+intentctl init --no-hooks          # begin adoption without blocking human commits
+# Review generated instructions, then include them in the one-time legacy import:
+git add AGENTS.md INTENT.md
+intentctl baseline                 # allowed only before the baseline is committed
+intentctl validate
+git add .intent
+intentctl validate --staged
+git commit -m 'Adopt intent tooling with unknown legacy provenance'
+intentctl report                   # human-readable reasons and adoption backlog
+intentctl reconcile --json         # give this review task to a coding agent
+```
+
+Initialization records the **index**, including any already staged changes; review
+`git diff --cached` first. It never stages files or invents historical intent. Untracked
+source is listed by audit but must be deliberately staged to enter governance. Review
+sensitive files before staging. Empty/new repositories are supported after `git init`.
+The first transaction is an unknown-provenance import only. Introduce explicit intents
+in later events, gradually, using the workflow below. Existing tests and behavior are
+evidence; their original motivation may remain unknown.
+
+`init` deploys a managed reference in `AGENTS.md` and the agent protocol in `INTENT.md`,
+preserving unrelated agent instructions. It refuses conflicting existing `INTENT.md`
+files before creating metadata or hooks. Use `init --no-instructions` to manage the
+integration yourself, or `deploy` to add instructions separately. `deploy --update`
+replaces only an intentctl-managed protocol; review and account for that change.
+Nothing copies this project's canonical intents or source code into your repository.
+
+Plain `init` also installs strict hooks; use it after gradual adoption when you want
+to require accounting before commits and pushes. Existing hooks and `core.hooksPath`
+are preserved. Repeating init preserves metadata. Hooks invoke the engine at its
+installed location; rerun init after uninstalling hooks if that location changes.
+`uninstall-hooks` restores originals. [Hook details](docs/git-integration.md).
+
+## Monitor human and agent changes
+
+```sh
+intentctl audit                    # check committed history plus local changes
+intentctl audit --since BASE --json # commits after a known ancestor + local state
+intentctl watch --interval 5 --json # foreground polling; emits changes, Ctrl-C stops
+intentctl watch --once --json       # one poll, useful for integrations
+intentctl reconcile --json          # read-only review context for an agent
+intentctl report > intent-report.md # Markdown for manual review
+```
+
+`audit`, `watch --once`, and `reconcile` exit 1 when attention is needed, 0 otherwise.
+Unknown legacy coverage is reported as an adoption backlog and alone does not fail
+an audit. Untracked files, local changes, invalid committed transitions, unresolved
+bindings, and outdated intent assessments need attention. Default audits scan all
+reachable history; `--since` explicitly narrows that scope. Shallow clones must fetch
+full history. `watch` is a foreground process, not a daemon or model invocation.
+
+Human edits may omit intent updates or bypass hooks. Monitoring detects structural
+gaps without approving explanations. Agents review diffs, tests, and human context,
+record explicit intent changes and uncertainty, and expose their rationale for human
+review. A later record cannot make an invalid historical commit valid: committed
+drift is identified by commit for branch repair under the repository's review policy.
+Never reset a committed baseline to conceal it. See [adoption and reconciliation](docs/adoption.md).
 
 ## Record independent intent
 
 The following creates a metadata-only intent and binds it to an existing file. Commands return JSON objects containing generated IDs; substitute the returned IDs for `I-ID` and `B-ID` below. IDs are full SHA-256 digests prefixed by their object type, not the short illustrative identifiers in the assignment.
 
 ```sh
-python3 tools/intentctl.py capture --key valid-tokens \
+intentctl capture --key valid-tokens \
   --description 'Introduce token validity policy' \
   --rationale 'Authentication requires acceptable credentials' --provenance unknown
-python3 tools/intentctl.py intent-create --event valid-tokens --key valid-tokens \
+intentctl intent-create --event valid-tokens --key valid-tokens \
   --title 'Token validity' --description 'Reject invalid tokens' \
   --rationale 'Invalid credentials must not grant access' \
   --requirement 'Accept only valid tokens'
-python3 tools/intentctl.py bind --event valid-tokens --key token-condition \
+intentctl bind --event valid-tokens --key token-condition \
   --intent I-ID --path auth.py --start 34 --end 45 \
   --rationale 'This expression checks token validity'
-python3 tools/intentctl.py declare --event valid-tokens --intent I-ID \
+intentctl declare --event valid-tokens --intent I-ID \
   --binding B-ID --action introduce
-python3 tools/intentctl.py finalize valid-tokens
+intentctl finalize valid-tokens
 git add .intent
-python3 tools/intentctl.py validate --staged
+intentctl validate --staged
 git commit -m 'Introduce token validity intent'
 ```
 
@@ -66,18 +130,18 @@ Ranges are half-open UTF-8 **byte offsets**, not character positions. Omitting `
 ```sh
 # Make and stage the intended source edit first.
 git add auth.py
-python3 tools/intentctl.py capture --key refactor \
+intentctl capture --key refactor \
   --description 'Extract authentication helper' \
   --rationale 'Centralize eligibility checks' --provenance unknown
-python3 tools/intentctl.py rebind B-ID --event refactor --path auth.py \
+intentctl rebind B-ID --event refactor --path auth.py \
   --start 34 --end 75 --rationale 'Policy is implemented in the helper'
-python3 tools/intentctl.py declare --event refactor --intent I-ID \
+intentctl declare --event refactor --intent I-ID \
   --binding B-ID --action preserve
 # Repeat rebind + declare for EVERY affected binding, including overlapping ones.
-python3 tools/intentctl.py finalize refactor
-python3 tools/intentctl.py validate
+intentctl finalize refactor
+intentctl validate
 git add .intent
-python3 tools/intentctl.py validate --staged
+intentctl validate --staged
 git commit -m 'Extract authentication helper'
 ```
 
@@ -92,16 +156,16 @@ For an intent-only change, capture with no staged source edits, use `intent-revi
 ## Query and diagnose
 
 ```sh
-python3 tools/intentctl.py status --json
-python3 tools/intentctl.py explain auth.py:2 --json
-python3 tools/intentctl.py explain auth.py:2 --at HEAD~1 --json
-python3 tools/intentctl.py history auth.py:2 --json
-python3 tools/intentctl.py show-intent I-ID --revision 1 --json
-python3 tools/intentctl.py show-binding B-ID --json
-python3 tools/intentctl.py impact I-ID --json
-python3 tools/intentctl.py doctor --json
-python3 tools/intentctl.py validate --commit HEAD
-python3 tools/intentctl.py validate --range BASE..HEAD
+intentctl status --json
+intentctl explain auth.py:2 --json
+intentctl explain auth.py:2 --at HEAD~1 --json
+intentctl history auth.py:2 --json
+intentctl show-intent I-ID --revision 1 --json
+intentctl show-binding B-ID --json
+intentctl impact I-ID --json
+intentctl doctor --json
+intentctl validate --commit HEAD
+intentctl validate --range BASE..HEAD
 ```
 
 Human output is indented JSON for records, and concise diagnostics for validation. JSON validation returns `valid`, `errors`, stable codes, paths, and messages; failure exits nonzero. `doctor` diagnoses without modifying history. Repair drafts or append corrective records; never overwrite committed revisions.
@@ -115,7 +179,7 @@ Human output is indented JSON for records, and concise diagnostics for validatio
 - [Security and trust](docs/security.md)
 - [Reproducible demonstration](docs/demonstration.md)
 - [Roadmap](docs/roadmap.md)
-- [Mandatory agent protocol](AGENTS.md)
+- [Agent entry point](AGENTS.md) and [mandatory intent protocol](INTENT.md)
 
 Canonical history is versioned JSON. Drafts and future caches are disposable. Source snapshots intentionally trade storage efficiency for durable intermediate states independent of commit boundaries. V1 scans metadata and uses explicit lineage; it has no AST matching, automatic identity inference, or persistent code-fragment IDs.
 

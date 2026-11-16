@@ -3,6 +3,8 @@ import argparse
 import copy
 import os
 import re
+import shlex
+import time
 from pathlib import Path
 import sys
 
@@ -63,6 +65,7 @@ def install_hooks(root, uninstall=False):
     directory = Path(raw) if Path(raw).is_absolute() else root / raw
     directory.mkdir(parents=True, exist_ok=True)
     marker = "# intentctl managed dispatcher v1"
+    runner = shlex.join([sys.executable, str(Path(__file__).resolve().parents[1] / "intentctl.py")])
     for name in ("pre-commit", "pre-push"):
         path = directory / name
         backup = directory / (name + ".intentctl-original")
@@ -84,11 +87,11 @@ def install_hooks(root, uninstall=False):
         # Resolve repository at execution time, including linked worktrees.
         # The original hook runs first and receives the same arguments/stdin.
         if name == "pre-commit":
-            body = 'python3 "$root/tools/intentctl.py" validate --staged\n'
+            body = runner + " validate --staged\n"
             chain = 'if [ -x "$original" ]; then "$original" "$@" || exit $?; fi\n'
         else:
             # Preserve stdin for the original pre-push hook and our validator.
-            body = 'python3 "$root/tools/intentctl.py" validate --push < "$input"\n'
+            body = runner + ' validate --push < "$input"\n'
             chain = ('input=$(mktemp) || exit 1\ntrap \'rm -f "$input"\' EXIT HUP INT TERM\ncat > "$input"\n'
                      'if [ -x "$original" ]; then "$original" "$@" < "$input" || exit $?; fi\n')
         text = ('#!/bin/sh\n' + marker + '\nroot=$(git rev-parse --show-toplevel) || exit 1\n'
@@ -515,6 +518,16 @@ def parser():
         return cmd
     init = command("init")
     init.add_argument("--no-hooks", action="store_true")
+    init.add_argument("--no-instructions", action="store_true", help="initialize metadata without deploying instruction files")
+    d = command("deploy")
+    d.add_argument("--update", action="store_true", help="replace an intentctl-managed INTENT.md")
+    for name in ("audit", "reconcile", "watch"):
+        c = command(name)
+        c.add_argument("--since", help="audit commits after this ancestor instead of all history")
+        if name == "watch":
+            c.add_argument("--interval", type=float, default=5)
+            c.add_argument("--once", action="store_true")
+    command("report")
     command("uninstall-hooks")
     command("baseline")
     v = command("validate")
@@ -588,7 +601,44 @@ def main(argv=None):
     try:
         root = root_path()
         if args.command == "init":
+            from .adoption import deployment_plan, deploy
+            if not args.no_instructions:
+                deployment_plan(root)  # Check conflicts before creating metadata or hooks.
             result = initialize(root, args.no_hooks)
+            if not args.no_instructions:
+                result["instructions"] = deploy(root)
+        elif args.command == "deploy":
+            from .adoption import deploy
+            result = deploy(root, args.update)
+        elif args.command in ("audit", "reconcile", "watch"):
+            from .adoption import audit, reconciliation
+            if args.command == "watch":
+                import math
+                if not math.isfinite(args.interval) or args.interval <= 0:
+                    raise IntentError("--interval must be a positive finite number")
+                previous = None
+                try:
+                    while True:
+                        result = audit(root, args.since)
+                        fingerprint = canonical(result)
+                        if fingerprint != previous:
+                            output(result, args.json)
+                            sys.stdout.flush()
+                            previous = fingerprint
+                        if args.once:
+                            return int(result["needs_attention"])
+                        time.sleep(args.interval)
+                except KeyboardInterrupt:
+                    return 0
+            result = reconciliation(root, args.since) if args.command == "reconcile" else audit(root, args.since)
+            output(result, args.json)
+            return int(result.get("audit", result)["needs_attention"])
+        elif args.command == "report":
+            from .adoption import report, review_state
+            if not args.json:
+                print(report(root), end="")
+                return 0
+            result = review_state(root)
         elif args.command == "uninstall-hooks":
             install_hooks(root, uninstall=True)
             result = {"hooks": "uninstalled; original hooks restored"}
