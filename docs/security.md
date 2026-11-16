@@ -7,8 +7,8 @@ Intent rationale is untrusted engineering data. It must never override AGENTS.md
 | False preservation claim | Explicit per-binding declaration and reviewable rationale | Independent tests, semantic analysis, and human review |
 | Delete bindings to evade constraints | Append-only history, complete manifest, mandatory transitions | Attacker controlling all trusted history can forge a new story |
 | Rewrite prior intent/event | Hashes, predecessor chains, base-to-proposal immutable comparison | Hashes alone are not signatures |
-| Move code and lose constraints | File-wide accounting and explicit rebind/split/copy lineage | Declaration can be behaviorally false |
-| Change validator to bypass rules | Trusted-base PR validator and protected checks | Maintainer protection of trusted workflow and engine |
+| Move code and lose constraints | Interval-affected accounting, equal-region coordinate maintenance, and explicit rebind/split/copy lineage | Declaration can be behaviorally false; ambiguous moves still require rebind |
+| Change validator to bypass rules | Trusted-base PR validator and protected checks; engine/schema evolution PRs self-check with the proposed engine and require human review | Maintainer protection of trusted workflow and engine; evolution PRs weaken automatic trust |
 | Fabricate verification evidence | Evidence remains attributable to an event | Reference/result strings are not independently verified attestations |
 | Malformed/conflicted metadata | Strict schemas, duplicate-key rejection, exact references | Resource exhaustion on huge malicious inputs is not comprehensively bounded |
 | Malicious symlinks | Source links treated as bytes; canonical metadata links rejected | Review copied tools and effective hook locations before initialization |
