@@ -1,0 +1,4 @@
+#!/bin/sh
+# Template only. The generated dispatcher also preserves existing hooks/stdin.
+root=$(git rev-parse --show-toplevel) || exit 1
+exec python3 "$root/tools/intentctl.py" validate --push

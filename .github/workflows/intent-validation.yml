@@ -1,0 +1,29 @@
+name: Intent validation and tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Validate introduced commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          base = os.environ.get('BASE_SHA', '')
+          revisions = base + '..HEAD' if base and set(base) != {'0'} else 'HEAD'
+          subprocess.run(['python3', 'tools/intentctl.py', 'validate', '--range', revisions], check=True)
+          PY
+      - name: Unit, real-Git integration, and demonstration tests
+        run: python3 -m unittest discover -s tests -v

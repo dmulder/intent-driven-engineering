@@ -1,0 +1,4 @@
+#!/bin/sh
+# Template only. `intentctl init` installs a dispatcher that chains existing hooks.
+root=$(git rev-parse --show-toplevel) || exit 1
+exec python3 "$root/tools/intentctl.py" validate --staged
