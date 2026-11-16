@@ -28,11 +28,13 @@ Intent graph cycles are allowed. The current implementation uses `related_intent
 
 Binding relationship values are implements, constrained-by, motivated-by, preserves, verifies, and historically-derived-from. Current applicability is determined by binding status, independently of relationship wording. Use historical status for causation that no longer governs code. Unresolved status retains a visible constraint; further source edits must explicitly resolve or end it.
 
+Optional binding `verification` separates agent claims from independent conclusions: `declared` (default when omitted on historical records), `pending`, `verified`, `failed`, or `unverifiable`. `verified` requires `method` and `evidence`. Event-level `verification` entries remain available for additional attestations.
+
 ## Coordinates and snapshots
 
 Targets contain path, start, end, source, and Git mode. Ranges are half-open byte intervals `[start,end)` in exact source bytes; empty ranges are valid insertion points. Paths are normalized relative POSIX paths, never absolute, dot segments, backslashes, or metadata paths. Source objects preserve CRLF, invalid text bytes, and missing final newlines unchanged.
 
-Queries use one-based lines delimited by LF, with byte intervals derived from the selected snapshot. Byte offsets can identify subline expressions. An insertion touching either boundary of a binding is conservatively relevant. Empty files admit `[0,0)`. V1's file-wide continuity policy is stricter than these interval overlap rules.
+Queries use one-based lines delimited by LF, with byte intervals derived from the selected snapshot. Byte offsets can identify subline expressions. An insertion touching either boundary of a binding is conservatively relevant. Empty files admit `[0,0)`. Active bindings are selected using live coordinates when equal-region mapping uniquely preserves pinned bytes onto the queried snapshot.
 
 NUL-containing files and symlinks are opaque objects with whole-object ranges. Git mode changes are events even when bytes do not change. Symlink text is captured without following its target. Renames are deletion/addition with explicit rebinding; no Git rename heuristic establishes identity.
 
@@ -48,4 +50,4 @@ Each declaration identifies an intent, optional binding, action, old/new current
 - Unapply, retire, and supersede end referenced binding applicability.
 - Preserve/rebind with source changes require successor binding revisions.
 
-Old binding pins remain accessible after intent evolution. An `unknown` provenance declaration acknowledges missing coverage but cannot excuse any known binding's required transition. `known` requires changed ranges to be covered on both existing sides of the event.
+Old binding pins remain accessible after intent evolution. An `unknown` provenance declaration acknowledges missing coverage of unbound legacy before-bytes but cannot excuse any known binding's required transition and cannot leave newly introduced after-bytes unbound. `known` requires changed ranges to be covered on both existing sides of the event.

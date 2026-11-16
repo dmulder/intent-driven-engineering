@@ -9,6 +9,7 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
+from intentlib.cli import draft_path
 from intentlib.core import canonical, loads, seal, write_json
 
 
@@ -70,7 +71,7 @@ class RepoTest(unittest.TestCase):
 
     def introduce(self, key, path="auth.py", start=0, end=None, event=None):
         event = event or key
-        if not (self.root / ".intent/drafts").exists() or event == key:
+        if not draft_path(self.root, event).exists():
             self.capture(event)
         i = self.ctl("intent-create", "--event", event, "--key", key, "--title", key,
                      "--description", "Required behavior " + key, "--rationale", "Explicit rationale", "--requirement", "Keep behavior")["id"]
@@ -81,7 +82,25 @@ class RepoTest(unittest.TestCase):
         self.ctl("declare", "--event", event, "--intent", i, "--binding", b, "--action", "introduce")
         return i, b
 
-    def finish(self, event, commit=True):
+    def cover_new_bytes(self, event, key=None):
+        """Declare intents for every after-path that introduces bytes in the draft."""
+        draft = self.read(str(draft_path(self.root, event).relative_to(self.root)))
+        key = key or (event + "-cover")
+        covered = []
+        for index, change in enumerate(draft["event"]["changes"]):
+            if change["after"] is None:
+                continue
+            if not any(a < z for a, z in (interval["after"] for interval in change["intervals"])):
+                continue
+            covered.append(self.introduce(f"{key}-{index}", path=change["path"], event=event))
+        return covered
+
+    def finish(self, event, commit=True, cover=False):
+        if cover:
+            draft = self.read(str(draft_path(self.root, event).relative_to(self.root)))
+            for req in draft.get("required_declarations", []):
+                self.preserve(event, req["intent_id"], req["binding_id"], path=req["target"]["path"])
+            self.cover_new_bytes(event)
         self.ctl("finalize", event)
         self.git("add", ".intent")
         self.ctl("validate", "--staged")

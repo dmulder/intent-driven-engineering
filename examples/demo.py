@@ -72,13 +72,17 @@ def demonstrate(destination):
         finish(key)
         return i, b
 
-    def preserve(key, pair, revision=None):
+    def preserve(key, pair, revision=None, whole=False):
         i, b = pair
         data = (root / "auth.py").read_bytes()
-        start = data.index(b"token.valid")
-        end = data.index(b"\n", start)
+        if whole:
+            start, end = 0, len(data)
+        else:
+            start = data.index(b"token.valid")
+            end = data.index(b"\n", start)
         args = ["rebind", b, "--event", key, "--path", "auth.py", "--start", str(start), "--end", str(end),
-                "--rationale", "Explicitly preserve policy in helper implementation"]
+                "--rationale", "Explicitly preserve policy in helper implementation",
+                "--verification-status", "declared"]
         if revision:
             args += ["--intent-revision", str(revision)]
         ctl(*args)
@@ -105,8 +109,9 @@ def demonstrate(destination):
     (root / "auth.py").write_text(REFACTORED)
     git("add", "auth.py")
     capture("C-helper-refactor")
-    preserve("C-helper-refactor", tokens)
-    preserve("C-helper-refactor", locks)
+    # Whole-file successors cover newly introduced helper structure while preserving both policies.
+    preserve("C-helper-refactor", tokens, whole=True)
+    preserve("C-helper-refactor", locks, whole=True)
     finish("C-helper-refactor")
     print("C: helper refactor explicitly preserved both intents")
     before = git("hash-object", "auth.py").stdout
@@ -120,8 +125,8 @@ def demonstrate(destination):
     (root / "auth.py").write_text(REFACTORED.replace("token.valid", "token.valid and not token.expired"))
     git("add", "auth.py")
     capture("E-reject-expired")
-    preserve("E-reject-expired", tokens, 2)
-    preserve("E-reject-expired", locks)
+    preserve("E-reject-expired", tokens, 2, whole=True)
+    preserve("E-reject-expired", locks, whole=True)
     finish("E-reject-expired")
     assert not ctl("status")["reassessment"]
     print("E: implementation updated; both bindings revised; lockout intent unchanged")
@@ -132,13 +137,13 @@ def demonstrate(destination):
     (root / "auth.py").write_text((root / "auth.py").read_text().replace("return token.valid", "return bool(token.valid").replace("not user.locked\n", "not user.locked)\n"))
     git("add", "auth.py")
     capture("GH-explicit-accounting")
-    preserve("GH-explicit-accounting", tokens, 2)
+    preserve("GH-explicit-accounting", tokens, 2, whole=True)
     failure = ctl("finalize", "GH-explicit-accounting", expect=1)
     assert "MISSING_TRANSITION" in str(failure)
     rejected = git("commit", "-qm", "Must be rejected", expect=1)
     assert "UNCOVERED_CHANGE" in rejected.stdout + rejected.stderr
     print("G: missing lockout declaration rejected; Git hook also rejected commit")
-    preserve("GH-explicit-accounting", locks)
+    preserve("GH-explicit-accounting", locks, whole=True)
     finish("GH-explicit-accounting")
     print("H: supplied missing declaration; hook accepted commit")
     ctl("validate", "--range", initial_commit + "..HEAD")

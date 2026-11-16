@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # pull_request defaults to a merge commit; validate merge commits explicitly fail.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -22,8 +24,12 @@ jobs:
           python3 - <<'PY'
           import os, subprocess
           base = os.environ.get('BASE_SHA', '')
-          revisions = base + '..HEAD' if base and set(base) != {'0'} else 'HEAD'
-          subprocess.run(['python3', 'tools/intentctl.py', 'validate', '--range', revisions], check=True)
+          if base and set(base) != {'0'}:
+              argv = ['python3', 'tools/intentctl.py', 'validate', '--range', base + '..HEAD']
+          else:
+              # Branch creation push: do not walk all of history with a newer validator.
+              argv = ['python3', 'tools/intentctl.py', 'validate', '--commit', 'HEAD']
+          subprocess.run(argv, check=True)
           PY
       - name: Unit, real-Git integration, and demonstration tests
         run: python3 -m unittest discover -s tests -v

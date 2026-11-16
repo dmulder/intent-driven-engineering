@@ -8,15 +8,15 @@ Machine-readable Git commands (`ls-files --stage -z`, `ls-tree -rz`, `cat-file`,
 
 ## Algorithm
 
-1. Parse every proposed canonical record. Reject noncanonical serialization, invalid schemas, missing schema definitions, and malformed source objects.
+1. Parse every proposed canonical record. Reject noncanonical serialization, invalid schemas, missing schema definitions, and malformed source objects. Schema-definition pins (published schemas must byte-match the running validator) apply to the proposed tree; base history may predate a schema upgrade.
 2. Compare committed canonical records with the base; reject modifications or deletion. Only the manifest can advance. Config and baseline cannot change after import.
 3. Validate record paths, identity types, hashes, revision chains, origin-event ownership, references, complete heads, complete event membership, targets, ranges, and lifecycle consistency.
 4. Require old manifest events to remain an identical prefix. Initialize source and current binding/intent maps from the base.
 5. Replay each new event. Its per-file before state must match the preceding state; exact declared diff intervals must match its retained source snapshots.
-6. Require explicit transitions and successor revisions for all active/unresolved pre-event bindings in every changed file. Validate action-specific intent revision, lifecycle, and binding ownership rules. An unresolved binding cannot remain unresolved through another affected code edit.
+6. Require explicit transitions and successor revisions for active/unresolved pre-event bindings whose live ranges overlap a change interval. Validate action-specific intent revision, lifecycle, and binding ownership rules. An unresolved binding cannot remain unresolved through another affected code edit.
 7. Require every owned intent or binding revision to have a declaration. Advance revision heads in order. A metadata-only event advances the semantic maps without changing source.
-8. Apply source changes and check known/unknown provenance declarations. Unknown provenance never suppresses known binding accounting.
-9. Compare the final replayed source with the proposed source: any difference is an uncovered change. Check current active targets against exact final snapshots. Report stale binding pins to newer intents as reassessment needs through query commands; they are valid states.
+8. Apply source changes. Advance live coordinates for unaffected bindings via deterministic equal-region mapping. Check known/unknown provenance: `known` still requires both sides covered; `unknown` may leave unbound legacy before-bytes uncovered but after-bytes that introduce content must be bound (`NEW_CODE_REQUIRES_INTENT`). Mode-only transitions do not introduce code.
+9. Compare the final replayed source with the proposed source: any difference is an uncovered change. Active targets must remain exactly pinned or uniquely preserved by mapping; otherwise `STALE_TARGET` / `EVENT_TARGET`. Report stale binding pins to newer intents as reassessment needs through query commands; they are valid states.
 
 Initial adoption is separate: a new unknown-provenance baseline must exactly inventory the proposed source. That first transaction cannot contain intents, bindings, or events. Previously uninstrumented Git commits are not retroactively declared covered.
 

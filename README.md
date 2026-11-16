@@ -83,9 +83,9 @@ git commit -m 'Extract authentication helper'
 
 Capture generates `.intent/drafts/E-….json` and a list of required declarations. It **never declares preservation**. Edit draft JSON for verification evidence or advanced many-region records; helpers cover common intent and binding operations. `declare` replaces an earlier declaration for the same intent/binding pair, so run it after preparing the corresponding revisions.
 
-`--provenance unknown` acknowledges unbound portions of a change; it does not waive known-intent accounting. `known` requires bindings to cover changed bytes in both existing source states. Leaving provenance unset prevents finalization.
+`--provenance unknown` acknowledges unbound *legacy before-bytes*; it does not waive known-intent accounting and cannot introduce unbound after-bytes. Newly introduced bytes always require at least one binding (`NEW_CODE_REQUIRES_INTENT` otherwise). `known` requires bindings to cover changed bytes in both existing source states. Leaving provenance unset prevents finalization.
 
-A file's complete snapshot changes even when an edit misses a binding's bytes. **V1 requires explicit rebinding/accounting for all active or unresolved bindings in any changed file.** This conservative rule avoids guessing range continuity.
+Bindings that do not overlap a changed interval are not required to rebind. Their pins may remain on older snapshots when deterministic equal-region mapping uniquely preserves their bytes (coordinate maintenance, not semantic inference). Ambiguous moves still need an explicit `rebind`. Use `--verification-status` on bind/rebind to separate claimed preservation from independently supported verification.
 
 For an intent-only change, capture with no staged source edits, use `intent-revise I-ID --event KEY --requirement TEXT`, and declare `modify`. Old bindings remain pinned to their exact revision and appear in `status`/`impact` as needing reassessment. Use `rebind --intent-revision N` in a later event to acknowledge the new policy.
 

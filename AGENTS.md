@@ -12,15 +12,15 @@ Code, intents, bindings, and events have independent identities and histories. G
 ## Before modifying code
 
 1. Identify logical changes, all applicable bindings, rationale, and verification needed.
-2. Prepare an explicit transition for EACH affected binding, including overlapping bindings for the same intent. Choose preserve, modify, supersede, retire, unapply, or rebind. Introduce new intent explicitly.
-3. Never infer disappearance or continuity of intent. Plan binding revisions for changed or moved targets. Distinguish globally retiring an intent from ending one binding.
-4. You may prepare the draft manually before edits; `capture` after staging supplies exact byte ranges. Drafts are proposals, never authoritative declarations.
+2. Prepare an explicit transition for EACH binding whose range overlaps a changed byte interval (including overlapping bindings for the same intent). Choose preserve, modify, supersede, retire, unapply, or rebind. Introduce new intent explicitly for newly introduced bytes.
+3. Never infer disappearance or continuity of intent. Unrelated bindings in a modified file may keep their pins when equal-region mapping uniquely preserves their bytes; ambiguous moves still require explicit rebind. Distinguish globally retiring an intent from ending one binding.
+4. You may prepare the draft manually before edits; `capture` after staging supplies exact byte ranges and lists only affected bindings. Drafts are proposals, never authoritative declarations. Record verification status separately from preserve/rebind claims (`declared`, `pending`, `verified`, `failed`, or `unverifiable`).
 
 ## After modifying code
 
 1. Stage the intended source changes with `git add` or `git add -p`.
 2. Run `python3 tools/intentctl.py capture --key CHANGE --description TEXT --rationale TEXT`. Inspect its JSON draft in `.intent/drafts/`.
-3. Use `intent-create`, `intent-revise`, `bind`, and `rebind` with `--event CHANGE`, or edit the draft directly. Complete all required transition declarations and record verification. Every affected binding needs its own declaration; capture never supplies preserve automatically.
+3. Use `intent-create`, `intent-revise`, `bind`, and `rebind` with `--event CHANGE`, or edit the draft directly. Complete all required transition declarations and record verification. Every affected binding needs its own declaration; capture never supplies preserve automatically. Unknown provenance may cover unbound legacy before-bytes only; after-bytes always need at least one binding.
 4. Run `python3 tools/intentctl.py finalize CHANGE`. Preserve all committed records. For additional logical events, stage the next source state and capture with another key; snapshots retain intermediate states.
 5. Run `python3 tools/intentctl.py validate` against the working tree. Then stage code AND `.intent` metadata and run `python3 tools/intentctl.py validate --staged`.
 6. Correct every failure before committing. Run `python3 -m unittest discover -s tests -v` for tool changes. Hooks are an additional check, not a substitute for these steps.

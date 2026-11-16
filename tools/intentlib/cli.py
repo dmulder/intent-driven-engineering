@@ -6,9 +6,10 @@ import re
 from pathlib import Path
 import sys
 
-from .core import (EMPTY_MANIFEST, IntentError, ValidationError, Store, canonical, changes_between, digest,
-                   git, head, identity, inventory, loads, metadata, put_object, record_path,
-                   ref, root_path, safe_path, seal, snapshot, source, validate, write_json)
+from .core import (EMPTY_MANIFEST, IntentError, ValidationError, Store, affected_by_changes,
+                   canonical, changes_between, digest, git, head, identity, inventory,
+                   live_target, loads, metadata, put_object, record_path, ref, root_path,
+                   safe_path, seal, snapshot, source, validate, verification_of, write_json)
 from .schema import ACTIONS, SCHEMAS, check, published
 
 
@@ -177,10 +178,15 @@ def capture(root, args):
     if (root / record_path("event", event["id"])).exists() or draft_path(root, args.key).exists():
         raise IntentError("event creation key already exists; choose a distinct --key")
     paths = {c["path"] for c in changes}
-    required = [{"intent_id": b["intent_id"], "binding_id": b["id"],
-                 "intent_revision": b["intent_revision"], "target": b["target"]}
-                for b in store.current("binding").values()
-                if b["status"] in ("active", "unresolved") and b["target"]["path"] in paths]
+    current_bindings = store.current("binding")
+    affected = affected_by_changes(current_bindings, changes, before, store.objects)
+    required = []
+    for b in affected.values():
+        live = live_target(b, before, store.objects)
+        required.append({"intent_id": b["intent_id"], "binding_id": b["id"],
+                         "intent_revision": b["intent_revision"], "target": b["target"],
+                         "live_target": ({"path": live["path"], "start": live["start"], "end": live["end"],
+                                          "mode": live["mode"]} if live else None)})
     draft = {"event": event, "intents": [], "bindings": [], "required_declarations": required}
     save_draft(root, args.key, draft)
     return {"draft": str(draft_path(root, args.key).relative_to(root)),
@@ -231,7 +237,8 @@ def add_binding(root, args):
         value = {"schema_version": 1, "id": i, "revision": 1, "previous_hash": None,
                  "intent_id": args.intent, "intent_revision": args.intent_revision,
                  "relationship": args.relationship, "status": args.status,
-                 "rationale": args.rationale, "predecessors": args.predecessor or []}
+                 "rationale": args.rationale, "predecessors": args.predecessor or [],
+                 "verification": {"status": args.verification_status or "declared"}}
     else:
         i = args.id
         if i not in current["bindings"]:
@@ -242,6 +249,17 @@ def add_binding(root, args):
         value.pop("content_hash", None)
         if args.intent_revision is not None:
             value["intent_revision"] = args.intent_revision
+    if args.verification_status or args.verification_method or args.verification_evidence:
+        verification = dict(value.get("verification") or {"status": "declared"})
+        if args.verification_status:
+            verification["status"] = args.verification_status
+        if args.verification_method:
+            verification["method"] = args.verification_method
+        if args.verification_evidence:
+            verification["evidence"] = args.verification_evidence
+        value["verification"] = verification
+    elif "verification" not in value:
+        value["verification"] = {"status": "declared"}
     if args.path:
         if not safe_path(args.path) or metadata(args.path):
             raise IntentError("binding target must be a relative ordinary source path")
@@ -434,10 +452,16 @@ def query(root, args):
     else:
         start, end = line_range(entry[1], line)
     from .core import touches
-    selected = [b for b in bindings.values() if b["target"]["path"] == path and touches(start, end, b["target"]["start"], b["target"]["end"])]
+    source_map = source(entries)
+    selected = []
+    for b in bindings.values():
+        live = live_target(b, source_map, store.objects) if b["status"] in ("active", "unresolved") else None
+        coords = live if live is not None else b["target"]
+        if coords["path"] == path and touches(start, end, coords["start"], coords["end"]):
+            selected.append((b, live))
     if args.command == "explain":
         result = []
-        for b in selected:
+        for b, live in selected:
             if b["status"] not in ("active", "unresolved"):
                 continue
             governed = store.intents[(b["intent_id"], b["intent_revision"])]
@@ -445,11 +469,14 @@ def query(root, args):
                            "current_intent": intents[b["intent_id"]],
                            "needs_reassessment": governed["revision"] != intents[b["intent_id"]]["revision"],
                            "target_matches": ref(entry) == {"source": b["target"]["source"], "mode": b["target"]["mode"]},
+                           "live_target": ({"path": live["path"], "start": live["start"], "end": live["end"],
+                                            "mode": live["mode"]} if live else None),
+                           "verification": verification_of(b),
                            "origin_event": store.events[b["created_by_event"]]})
         return {"path": path, "line": line, "applicable": result,
-                "provenance": "known where bound; unbound regions have unknown provenance"}
+                "provenance": "known where bound; unbound regions have unknown provenance; new bytes require intent"}
     # Explicit lineage plus spatial matches in each historical snapshot. Never infer moves.
-    selected_ids = {b["id"] for b in selected}
+    selected_ids = {b["id"] for b, _ in selected}
     for b in store.bindings.values():
         target = b["target"]
         if target["path"] == path:
@@ -475,7 +502,8 @@ def query(root, args):
             "intent_revisions": [v for (i, r), v in sorted(store.intents.items()) if i in selected_intents],
             "binding_revisions": [v for (i, r), v in sorted(store.bindings.items()) if i in selected_ids],
             "current_bindings": [bindings[i] for i in sorted(selected_ids) if i in bindings],
-            "baseline_provenance": "unknown", "selection": "explicit binding lineage and spatial matches at each historical snapshot; line numbers alone do not establish identity"}
+            "baseline_provenance": "unknown",
+            "selection": "explicit binding lineage, live coordinate continuity, and spatial matches at each historical snapshot; line numbers alone do not establish identity"}
 
 
 def parser():
@@ -542,6 +570,10 @@ def parser():
         c.add_argument("--end", type=int)
         c.add_argument("--rationale", required=True)
         c.add_argument("--status", choices=["active", "ended", "historical", "unresolved"], default="active")
+        c.add_argument("--verification-status", choices=["declared", "pending", "verified", "failed", "unverifiable"],
+                       help="separate claimed preservation from independently supported verification")
+        c.add_argument("--verification-method", help="how verification was performed when status is verified")
+        c.add_argument("--verification-evidence", help="evidence reference for verified/failed/unverifiable claims")
     c = command("declare")
     c.add_argument("--event", required=True)
     c.add_argument("--intent", required=True)

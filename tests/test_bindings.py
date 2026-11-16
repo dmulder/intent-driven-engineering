@@ -67,15 +67,16 @@ class BindingTests(RepoTest):
         self.write("auth.py", "é\r\nabc")
         self.git("add", "auth.py")
         self.capture("encoding")
-        self.finish("encoding")
+        self.finish("encoding", cover=True)
         i, b = self.bound(start=0, end=2)
-        self.assertEqual(self.ctl("explain", "auth.py:1")["applicable"][0]["binding"]["target"]["end"], 2)
+        ends = {item["binding"]["target"]["end"] for item in self.ctl("explain", "auth.py:1")["applicable"]}
+        self.assertIn(2, ends)
         self.write("auth.py", "éX\r\nabc")
         self.git("add", "auth.py")
         result = self.capture("boundary")
-        self.assertEqual(len(self.read(result)["required_declarations"]), 1)
-        self.preserve("boundary", i, b, start=0, end=2)
-        self.finish("boundary")
+        required = {item["binding_id"] for item in self.read(result)["required_declarations"]}
+        self.assertIn(b, required)
+        self.finish("boundary", cover=True)
 
     def test_split_and_consolidate_explicit_lineage(self):
         i, original = self.bound()
