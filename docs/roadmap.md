@@ -10,6 +10,7 @@
 - [x] Region-aware affected bindings with deterministic equal-region coordinate maintenance (no file-wide rebind tax).
 - [x] Stricter unknown provenance: newly introduced after-bytes require intent coverage.
 - [x] Binding verification states separate claimed preservation from independently supported conclusions.
+- [x] True-up: resumable retrospective discovery of non-authoritative pseudo-intent from Git and forge history, with reviewed promotion into canonical records ([docs/trueup.md](trueup.md)).
 
 ## Repository adoption goals
 
@@ -37,6 +38,14 @@ communication to other agents and to humans reviewing why a change happened.
 5. Add typed intent relationships and richer independently verified evidence with hashes, attestations, and signatures.
 6. Introduce first-class code fragment identities that survive moves/splits without replacing binding identity; keep location queries distinct from fragment/binding history queries.
 7. Reduce snapshot duplication by referencing Git blobs where a commit already stores the bytes, retaining overlay objects for intermediate states Git does not.
+
+## True-up follow-ups
+
+- Authenticated, signed reviews (current reviews are local and unauthenticated attributions).
+- Additional forges (Gitea, Bitbucket) and review-thread resolution state.
+- Incremental `extend` for rewritten history with explicit reconciliation of discoveries tied to dropped commits.
+- Independent verification records that can upgrade a promoted binding from `pending`.
+- Benchmarking on multi-hundred-thousand-commit histories, and optional use of `cat-file --batch` pipelines for inspection.
 
 ## Open architectural questions
 

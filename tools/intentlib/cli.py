@@ -514,7 +514,8 @@ def query(root, args):
 
 
 def parser():
-    p = argparse.ArgumentParser(description="Intent-native Git overlay (Python standard library)")
+    p = argparse.ArgumentParser(description="Intent-native Git overlay (Python standard library). "
+                                "Optional: `intentctl trueup --help` retrofits non-authoritative retrospective intent from Git history.")
     sub = p.add_subparsers(dest="command", required=True)
     def command(name):
         cmd = sub.add_parser(name)
@@ -546,6 +547,9 @@ def parser():
         q.add_argument("--at", help="query committed snapshot REV instead of working tree")
         if name in ("explain", "history"):
             q.add_argument("location")
+            q.add_argument("--trueup-state", help="true-up state directory (default: <git-common-dir>/intent-trueup, or $INTENTCTL_TRUEUP_STATE_DIR)")
+            q.add_argument("--no-retrospective", action="store_true",
+                           help="omit the optional non-authoritative `intentctl trueup` section even if a true-up store exists")
         elif name in ("show-intent", "show-binding", "impact"):
             q.add_argument("id")
             if name != "impact":
@@ -600,7 +604,32 @@ def parser():
     return p
 
 
+def retrospective(root, args, result):
+    """Attach labeled non-authoritative true-up discoveries to explain/history output when a store exists.
+
+    Optional and failure-isolated: the canonical answer is never changed or blocked by this section."""
+    if getattr(args, "no_retrospective", False) or not isinstance(result, dict):
+        return result
+    try:
+        from .trueup import query as trueup_query
+        from .trueup.gitscan import Repo
+        repo = Repo(root)
+        store = trueup_query.open_store(repo, getattr(args, "trueup_state", None), must_exist=False)
+        if store is None:
+            return result
+        path, line = location(args.location)
+        result["retrospective"] = trueup_query.retrospective_section(repo, store, path, line, getattr(args, "at", None))
+    except Exception as exc:  # noqa: BLE001 - the canonical query must still succeed
+        result["retrospective"] = {"available": False, "authority": "non-authoritative",
+                                   "error": f"true-up lookup failed and was skipped: {type(exc).__name__}: {str(exc)[:200]}"}
+    return result
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["trueup"]:
+        from .trueup.cli import main as trueup_main
+        return trueup_main(argv[1:])
     args = parser().parse_args(argv)
     try:
         root = root_path()
@@ -669,6 +698,8 @@ def main(argv=None):
             result = run_validation(root, args)
         else:
             result = query(root, args)
+            if args.command in ("explain", "history"):
+                result = retrospective(root, args, result)
         output(result, args.json)
         return 1 if isinstance(result, dict) and result.get("valid") is False else 0
     except ValidationError as exc:
