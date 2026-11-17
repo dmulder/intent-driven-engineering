@@ -9,10 +9,11 @@ import signal
 import sys
 import threading
 
-from . import ANALYSIS_VERSION, NON_AUTHORITATIVE_LABEL, PROMPT_VERSION, STATE_FORMAT
-from . import analysis, engine as engine_mod, forge as forge_mod, gitscan, graph as graph_mod, promote as promote_mod, query as query_mod
+from . import ANALYSIS_VERSION, RECONSTRUCTED_LABEL, PROMPT_VERSION, STATE_FORMAT
+from . import analysis, engine as engine_mod, forge as forge_mod, gitscan, graph as graph_mod, query as query_mod
 from .providers import (BUILTIN_PROVIDERS, Budget, Caller, Circuits, build_providers)
 from .store import Store, default_state_dir
+from .importer import import_history
 from .util import FatalStateError, TrueUpError, dumps, iso, now, read_json
 
 EXAMPLES = """examples:
@@ -24,8 +25,8 @@ EXAMPLES = """examples:
   intentctl trueup status                        # coverage: inspection / AI / external evidence / discoveries
   intentctl trueup failures && intentctl trueup retry --stage analysis
   intentctl trueup query src/auth.py:42          # retrospective claims for a location (also shown by `explain`)
-  intentctl trueup show N-... && intentctl trueup review N-... --decision approve --reviewer me
-  intentctl trueup promote N-... --confirm HASH --bind src/auth.py:40-60    # reviewed, validated, never automatic
+  intentctl explain src/auth.py:42 --json         # ordinary canonical history, including reconstructed context
+  git add .intent && intentctl validate --staged  # commit the imported intent data
 """
 
 
@@ -44,14 +45,14 @@ def emit(value, as_json):
 
 def common(p):
     p.add_argument("--repo", help="path of the Git repository to read (default: the repository containing the current directory)")
-    p.add_argument("--state-dir", help="true-up state directory (default: <git-common-dir>/intent-trueup, outside the working tree)")
+    p.add_argument("--cache-dir", "--state-dir", dest="state_dir", help="processing cache (default: .intent/cache/trueup); results always go into .intent")
     p.add_argument("--json", action="store_true", help="machine-readable output")
 
 
 def parser():
     top = argparse.ArgumentParser(prog="intentctl trueup", description=(
-        "Retrospective intent true-up. Reconstructs evidence-backed, NON-AUTHORITATIVE history of why code is the way it is, "
-        "reading Git history without modifying the repository. Results never become canonical intent except through `promote`."),
+        "Reconstruct project history as actual .intent records, with evidence, uncertainty and pending verification. "
+        "Import preserves Git history and source files; processing checkpoints live in ignored .intent/cache/trueup/."),
         epilog=EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = top.add_subparsers(dest="trueup_command", required=True)
 
@@ -78,6 +79,7 @@ def parser():
 
     p = add("run", "process pending commits; resumable and idempotent (use --max-commits for a small trial)")
     p.add_argument("--no-ai", action="store_true", help="inspection (and optional forge evidence) only; no model calls")
+    p.add_argument("--dry-run", action="store_true", help="analyse into the disposable cache without importing .intent records")
     p.add_argument("--provider", action="append", help="ordered AI provider (repeatable); fallback happens only through this list. Built-ins: " + ", ".join(sorted(BUILTIN_PROVIDERS)))
     p.add_argument("--provider-path", action="append", metavar="NAME=PATH", help="override a provider's executable")
     p.add_argument("--model", action="append", metavar="NAME=MODEL", help="model for a provider (where its CLI supports one)")
@@ -123,12 +125,12 @@ def parser():
     p.add_argument("--provider", action="append")
     p.add_argument("--reset-circuits", action="store_true")
 
-    p = add("show", "show one discovery (N-...), finding (F-...), or commit record")
+    p = add("show", "show an imported canonical intent (I-...) or cached commit diagnostics")
     p.add_argument("id")
     p.add_argument("--detail", action="store_true", help="include full quotes and link evidence")
     p.add_argument("--at", help="snapshot for present-day reconciliation (default HEAD)")
 
-    p = add("list", "list discoveries")
+    p = add("list", "list reconstructed canonical intents")
     p.add_argument("--path")
     p.add_argument("--kind", choices=analysis.KINDS)
     p.add_argument("--lifecycle", choices=["active-in-history", "superseded", "reversed", "retired"])
@@ -140,41 +142,19 @@ def parser():
     p = add("tree", "plain-text evolution of discoveries and their relations")
     p.add_argument("--limit", type=int, default=100)
 
-    p = add("query", "retrospective claims for PATH:LINE, separated from canonical intent")
+    p = add("query", "canonical intent and reconstructed historical context for PATH:LINE")
     p.add_argument("location")
     p.add_argument("--at", help="query this revision instead of HEAD")
     p.add_argument("--detail", action="store_true")
 
-    p = add("review", "record an attributed review decision for a discovery (local, unauthenticated)")
-    p.add_argument("node")
-    p.add_argument("--decision", required=True, choices=list(promote_mod.DECISIONS))
-    p.add_argument("--reviewer", required=True)
-    p.add_argument("--note", default="")
-
-    p = add("promote", "promote an approved discovery into canonical intent through the normal intentctl workflow")
-    p.add_argument("node")
-    p.add_argument("--confirm", required=True, help="content hash of the discovery you reviewed (printed by `show`)")
-    p.add_argument("--key", help="creation key for the canonical intent (default trueup-<node>)")
-    p.add_argument("--bind", action="append", metavar="PATH[:FIRST-LAST]", help="bind the intent to this region of the CURRENT index (repeatable); "
-                   "suggestions are shown by `show`/`--dry-run` but never applied automatically")
-    p.add_argument("--binding-status", choices=["historical", "active"], default="historical",
-                   help="historical (default) cannot block edits; active imposes a constraint and needs --applicability-rationale")
-    p.add_argument("--applicability-rationale")
-    p.add_argument("--relationship")
-    p.add_argument("--title")
-    p.add_argument("--requirement", action="append")
-    p.add_argument("--constraint", action="append")
-    p.add_argument("--related", action="append")
-    p.add_argument("--dry-run", action="store_true")
-
-    p = add("graph-rebuild", "recompute the graph from durable findings and link decisions")
+    p = add("graph-rebuild", "rebuild the internal processing graph from cached findings and links")
     p = add("verify", "check state integrity (manifest, records, orphan temp files); --repair removes only crash leftovers and rebuilds the graph")
     p.add_argument("--repair", action="store_true")
     return top
 
 
 def _run_options(p):
-    for flag, kw in (("--no-ai", {"action": "store_true"}), ("--provider", {"action": "append"}), ("--provider-path", {"action": "append"}),
+    for flag, kw in (("--dry-run", {"action": "store_true"}), ("--no-ai", {"action": "store_true"}), ("--provider", {"action": "append"}), ("--provider-path", {"action": "append"}),
                      ("--model", {"action": "append"}), ("--acknowledge-data-sharing", {"action": "store_true"}),
                      ("--network", {"choices": ["off", "forge"]}), ("--allow-insecure-http", {"action": "store_true"}),
                      ("--forge-association", {"choices": ["auto", "always", "never"]}), ("--forge-depth", {"type": int}),
@@ -228,6 +208,11 @@ def cmd_init(args):
         explicit = forges[len(detected):]
         explicit[0]["role"] = "primary"
     file_config = load_config_file(args.config)
+    if path == default_state_dir(repo):
+        ignore = repo.toplevel / ".intent/.gitignore"
+        ignore.parent.mkdir(parents=True, exist_ok=True)
+        if not ignore.exists():
+            ignore.write_text("drafts/\ncache/\n")
     config = {"format": STATE_FORMAT, "created_at": iso(), "analysis_version": ANALYSIS_VERSION, "prompt_version": PROMPT_VERSION,
               "limits": {**analysis.DEFAULT_LIMITS, **file_config.get("limits", {})},
               "forge": {"network": args.network, "forges": forges, "limits": file_config.get("forge", {}).get("limits", {}),
@@ -448,6 +433,25 @@ def cmd_run(args, prepare=None):
         status, report = eng.run(items, max_commits=args.max_commits)
         query_mod.write_coverage_cache(store, report)
         result = summarize_run(status, report, eng, scope_check)
+        if eng.ai and not args.dry_run:
+            try:
+                store.put("imports", "latest", {"status": "pending"})
+                result["import"] = import_history(repo, graph_mod.load_graph(store), eng.manifest, report,
+                                                   eng.limits["max_diff_bytes"])
+                result["import"]["status"] = "complete"
+                store.put("imports", "latest", result["import"])
+                result["next"].append("git add .intent && intentctl validate --staged, then commit the imported history")
+            except Exception as exc:
+                from ..core import IntentError
+                if not isinstance(exc, (IntentError, TrueUpError)):
+                    raise
+                result.update(status="incomplete", complete=False, exit_code=4,
+                              import_error=f"canonical historical import failed: {exc}")
+                store.put("imports", "latest", {"status": "failed", "error": result["import_error"]})
+                result["next"].append("fix the import error and rerun; analysis checkpoints are retained")
+        run_record = read_json(store.path / "runs" / (eng.run_id + ".json"))
+        run_record.update(status=result["status"], canonical_import=result.get("import"), import_error=result.get("import_error"))
+        store.write_run(eng.run_id, run_record)
         if state.get("signal") == signal.SIGTERM:
             result["exit_code"] = 143
         return result
@@ -523,9 +527,13 @@ def cmd_status(args):
     query_mod.write_coverage_cache(store, report)
     runs = store.runs()
     last = runs[-1] if runs else None
-    return {"label": NON_AUTHORITATIVE_LABEL, "state_dir": str(store.path), "store": store.meta()["store_id"], "coverage": report,
+    import_state = store.get("imports", "latest", default={"status": "not_requested"})
+    import_incomplete = import_state["status"] in ("pending", "failed")
+    return {"label": RECONSTRUCTED_LABEL, "import": import_state, "complete": report["complete"] and not import_incomplete,
+            "state_dir": str(store.path), "store": store.meta()["store_id"], "coverage": report,
             "last_run": last, "moved_refs": ref_moves(manifest, repo), "circuits": store.circuits(),
             "warnings": (["the last run never finished (crash or kill); durable progress was kept, re-run to resume"] if last and last.get("status") in ("running", "crashed_or_killed") else [])
+            + (["Canonical import incomplete: " + import_state.get("error", "interrupted import; rerun to resume")] if import_incomplete else [])
             + ([] if report["complete"] else ["NOT COMPLETE: see coverage.incomplete_items; a partial run is never reported as success"])}
 
 
@@ -538,7 +546,7 @@ def cmd_report(args):
     for run in runs:
         for k, v in (run.get("usage_reported") or {}).items():
             usage["reported"][k] = usage["reported"].get(k, 0) + v
-    return {"label": NON_AUTHORITATIVE_LABEL, "scope": manifest["scope"], "history_coverage": manifest["coverage"], "manifest_generations": manifest["generations"],
+    return {"label": RECONSTRUCTED_LABEL, "scope": manifest["scope"], "history_coverage": manifest["coverage"], "manifest_generations": manifest["generations"],
             "ordering": manifest["ordering"], "coverage": report, "runs": runs[-20:], "usage_across_runs": usage,
             "usage_note": "only provider-reported figures are summed; unreported usage is unknown",
             "graph": graph_state(store)}
@@ -575,103 +583,28 @@ def cmd_providers(args):
             "note": "availability only checks that the executable exists; no model call is made"}
 
 
-def find_node(graph, ident):
-    if ident in graph.nodes:
-        return graph.nodes[ident]
-    matches = [n for n in graph.nodes if n.startswith(ident)]
-    if len(matches) == 1:
-        return graph.nodes[matches[0]]
-    if ident.startswith("F-") and ident in graph.by_finding:
-        return graph.nodes[graph.by_finding[ident]]
-    raise TrueUpError(f"no unique discovery matches {ident!r}" + (f" ({len(matches)} candidates)" if matches else ""))
-
-
 def cmd_show(args):
-    repo, store = reader(args)
+    repo = open_repo(args)
     if re.fullmatch(r"[0-9a-f]{7,64}", args.id):
-        manifest = store.manifest()
-        hits = [c["sha"] for c in manifest["commits"] if c["sha"].startswith(args.id)]
+        _, store = reader(args)
+        hits = [c["sha"] for c in store.manifest()["commits"] if c["sha"].startswith(args.id)]
         if len(hits) != 1:
             raise TrueUpError(f"{args.id!r} matches {len(hits)} commits")
-        record = store.commit(hits[0])
-        return {"label": NON_AUTHORITATIVE_LABEL, "commit": hits[0], "record": record, "attempts": store.list_nested("attempts", hits[0]),
-                "link": store.get("links", hits[0])}
-    graph = graph_mod.load_graph(store)
-    node = find_node(graph, args.id)
-    cache = {}
-    applicability = graph_mod.applicability(repo, node, args.at or "HEAD", cache, gitscan)
-    view = query_mod.node_view(node, args.detail, applicability)
-    review = promote_mod.current_review(store, node)
-    view.update(label=NON_AUTHORITATIVE_LABEL, review=review, promoted=store.get("promotions", node["id"]),
-                suggested_bindings=query_mod.suggest_bindings(repo, node, args.at or "HEAD"),
-                suggested_bindings_note="suggestions are NOT proposals approved by anyone; choose regions yourself with `promote --bind`",
-                incoming=[{"from": n["id"], "type": e["type"], "commit": e["commit"]} for n in graph.nodes.values() for e in n["edges"] if e["to"] == node["id"]])
-    return view
+        return {"commit": hits[0], "record": store.commit(hits[0]), "link": store.get("links", hits[0]),
+                "attempts": store.list_nested("attempts", hits[0])}
+    return query_mod.show(repo, args.id, args.at)
 
 
 def cmd_list(args):
-    repo, store = reader(args)
-    graph = graph_mod.load_graph(store)
-    rows = []
-    for node in sorted(graph.nodes.values(), key=lambda n: n["timeline"][0]["index"]):
-        if args.path and args.path not in node["paths"]:
-            continue
-        if args.kind and node["kind"] != args.kind:
-            continue
-        if args.lifecycle and node["lifecycle"] != args.lifecycle:
-            continue
-        if args.commit and not any(t["commit"].startswith(args.commit) for t in node["timeline"]):
-            continue
-        if args.reference and args.reference not in node["resource_keys"]:
-            continue
-        if args.contains:
-            hay = (node["title"] + " " + " ".join(f["statement"] for f in node["findings_data"])).lower()
-            if args.contains.lower() not in hay:
-                continue
-        rows.append({"id": node["id"], "kind": node["kind"], "title": node["title"], "lifecycle": node["lifecycle"], "paths": node["paths"][:5],
-                     "first_commit": node["first_commit"][:12], "last_commit": node["last_commit"][:12], "findings": len(node["findings_data"]),
-                     "contested": bool(node["contested_by"])})
-    return {"label": NON_AUTHORITATIVE_LABEL, "total": len(rows), "discoveries": rows[:args.limit]}
+    return query_mod.list_intents(open_repo(args), args)
 
 
 def cmd_tree(args):
-    repo, store = reader(args)
-    return query_mod.render_tree(graph_mod.load_graph(store), args.limit)
+    return query_mod.tree(open_repo(args), args.limit)
 
 
 def cmd_query(args):
-    repo, store = reader(args)
-    path, _, line = args.location.rpartition(":")
-    if not path or not line.isdigit() or int(line) < 1:
-        raise TrueUpError("location must be PATH:LINE (one-based)")
-    return query_mod.retrospective_section(repo, store, path, int(line), args.at, args.detail)
-
-
-def cmd_review(args):
-    repo, store = reader(args)
-    store.acquire()
-    try:
-        graph = graph_mod.load_graph(store)
-        node = find_node(graph, args.node)
-        entry = promote_mod.record_review(store, node, args.decision, args.reviewer, args.note)
-    finally:
-        store.release()
-    return {"node": node["id"], "review": entry, "note": "A review is a local, attributed, unauthenticated record. Approval does not verify the claim; "
-                                                         "`promote` additionally requires --confirm with the content hash."}
-
-
-def cmd_promote(args):
-    repo, store = reader(args)
-    root = repo.toplevel
-    if root is None:
-        raise TrueUpError("promotion needs a working tree (bare repositories are not supported)")
-    store.acquire()
-    try:
-        graph = graph_mod.load_graph(store)
-        node = find_node(graph, args.node)
-        return promote_mod.promote(root, store, repo, node, args)
-    finally:
-        store.release()
+    return query_mod.query(open_repo(args), args.location, args.at)
 
 
 def cmd_graph_rebuild(args):
@@ -719,16 +652,14 @@ def cmd_verify(args):
 
 HANDLERS = {"init": cmd_init, "extend": cmd_extend, "estimate": cmd_estimate, "run": cmd_run, "status": cmd_status, "report": cmd_report,
             "failures": cmd_failures, "retry": cmd_retry, "reanalyze": cmd_reanalyze, "providers": cmd_providers, "show": cmd_show,
-            "list": cmd_list, "tree": cmd_tree, "query": cmd_query, "review": cmd_review, "promote": cmd_promote,
+            "list": cmd_list, "tree": cmd_tree, "query": cmd_query,
             "graph-rebuild": cmd_graph_rebuild, "verify": cmd_verify}
 
 
 def render_human(command, result):
-    if command == "query" and isinstance(result, dict) and "discoveries" in result:
-        return query_mod.render_text(result)
     if command == "status":
         c = result["coverage"]
-        lines = [result["label"], "", f"state: {result['state_dir']}", f"commits in scope: {c['commits_in_scope']}  (history complete: {c['manifest']['history_complete']})"]
+        lines = [result["label"], "", f"processing cache: {result['state_dir']}", f"commits in scope: {c['commits_in_scope']}  (history complete: {c['manifest']['history_complete']})"]
         lines += [f"  note: {n}" for n in c["manifest"]["notes"]]
         for name, key in (("inspection", "inspection"), ("AI analysis", "ai_analysis"), ("external evidence", "external_evidence"), ("linking", "linking")):
             lines.append(f"{name}: " + ", ".join(f"{k}={v}" for k, v in c[key].items() if v))

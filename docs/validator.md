@@ -18,7 +18,7 @@ Machine-readable Git commands (`ls-files --stage -z`, `ls-tree -rz`, `cat-file`,
 8. Apply source changes. Advance live coordinates for unaffected bindings via deterministic equal-region mapping. Check known/unknown provenance: `known` still requires both sides covered; `unknown` may leave unbound legacy before-bytes uncovered but after-bytes that introduce content must be bound (`NEW_CODE_REQUIRES_INTENT`). Mode-only transitions do not introduce code.
 9. Compare the final replayed source with the proposed source: any difference is an uncovered change. Active targets must remain exactly pinned or uniquely preserved by mapping; otherwise `STALE_TARGET` / `EVENT_TARGET`. Report stale binding pins to newer intents as reassessment needs through query commands; they are valid states.
 
-Initial adoption is separate: a new unknown-provenance baseline must exactly inventory the proposed source. That first transaction cannot contain intents, bindings, or events. Previously uninstrumented Git commits are not retroactively declared covered.
+Initial adoption requires an unknown-provenance baseline that exactly inventories the proposed source. Normally this transaction contains no intents, bindings or events. Explicit `retrospective-import` events may accompany the baseline: the validator reuses ordinary transition checks against that baseline, requires metadata-only `import` transitions with reconstructed intent and historical, pending-verification bindings, and rejects source changes or manually authored intent replacement. Previously uninstrumented Git commits are not retroactively declared covered, and imported context does not satisfy current source-change coverage.
 
 ## Diagnostics and guarantees
 

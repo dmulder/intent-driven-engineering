@@ -1,251 +1,320 @@
-"""End to end: retrofit a repository that never used intentctl, survive AI and forge failures, resume,
-query a file, adopt intentctl, review and selectively promote through the canonical workflow."""
+"""True-up writes portable, append-only canonical history that agents can query directly."""
+import argparse
+import copy
 import json
 import os
-from pathlib import Path
 import shutil
-import subprocess
-import sys
-import unittest
+from pathlib import Path
+from unittest import mock
 
-from trueup_support import GIT_ENV, MockForge, PROJECT, TrueUpTest, provider_spec
+from trueup_support import TrueUpTest, GitRepo, provider_spec
+from intentlib import cli
+from intentlib.core import Store as CanonicalStore, canonical, snapshot, validate
+from intentlib.trueup import importer, graph as graph_mod
+from intentlib.trueup.util import TrueUpError
 
 
 class EndToEnd(TrueUpTest):
-    def build_history(self, mock):
-        r = self.repo
-        mock.github_issue("acme/widgets", 7, "Token comparison", "Timing attacks on token checks.",
-                          ["We considered bcrypt but rejected it: too slow for per-request checks."], pull=True)
-        mock.github_issue("acme/widgets", 8, "Docs ticket", "Document the token flow.", [])
-        mock.queue("/repos/acme/widgets/issues/8", *[(500, {}, {"message": "upstream hiccup"})] * 3)
-        self.c1 = r.commit("Add auth check\n\nKeep the first version simple.", {"auth.py": "def auth(t):\n    return t == 'x'\n"})
-        self.c2 = r.commit("Use constant-time comparison (#7)\n\nPrevents timing attacks; adjusts the earlier check. [ai-flaky]",
-                           {"auth.py": "import hmac\n\ndef auth(t):\n    return hmac.compare_digest(t, 'x')\n"})
-        self.c3 = r.commit("Mention ticket #8 in docs", {"docs.md": "see #8\n"})
-        self.c4 = r.commit("Revert constant-time comparison\n\nThis reverts commit " + self.c2 + "; reverts the timing fix for old clients.",
-                           {"auth.py": "def auth(t):\n    return t == 'x'\n"})
-        self.c5 = r.commit("Add logging module", {"log.py": "import logging\n"})
+    import_results = True
 
-    def adopt_intentctl(self):
-        r = self.repo
-        shutil.copytree(PROJECT / "tools", r.path / "tools", ignore=shutil.ignore_patterns("__pycache__"))
-        r.write(".gitignore", "__pycache__/\n.intent/drafts/\n.intent/cache/\n")
-        r.git("add", ".")
-        self.ctl("init")
-        r.git("add", ".")
-        self.ctl("baseline")
-        r.git("add", ".")
-        r.git("commit", "-qm", "adopt intentctl")
+    def canonical(self):
+        return CanonicalStore(snapshot(self.repo.path, working=True))
 
-    def ctl(self, *args, ok=True, state=None):
-        env = {**os.environ, **GIT_ENV, "INTENTCTL_TRUEUP_STATE_DIR": str(state or self.state)}
-        result = subprocess.run([sys.executable, "tools/intentctl.py", *args, "--json"], cwd=self.repo.path, env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if ok and result.returncode:
-            self.fail(f"{args}: {result.stdout.decode()} {result.stderr.decode()}")
-        try:
-            return json.loads(result.stdout)
-        except ValueError:
-            return {"_raw": result.stdout.decode(), "_err": result.stderr.decode(), "_rc": result.returncode}
+    def query(self, command, location):
+        return cli.query(self.repo.path, argparse.Namespace(command=command, location=location, at=None))
 
-    def intent_bytes(self):
-        root = self.repo.path / ".intent"
-        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file() and "drafts" not in p.parts and "cache" not in p.parts}
+    def records(self):
+        root = self.repo.path / '.intent'
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*.json')
+                if not any(part in ('cache','drafts') for part in p.relative_to(root).parts)}
 
-    def test_full_retrofit_story(self):
-        os.environ["FAKE_AI_FLAKY"] = "3"
-        mock = MockForge()
-        self.addCleanup(mock.close)
-        self.build_history(mock)
-        before = self.repo.state_fingerprint()
-        self.init(providers={"fake": provider_spec()}, extra_args=["--forge", mock.github_spec("acme/widgets"), "--network", "forge"],
-                  config={"forge": {"limits": {"backoff_base": 0}}})
+    def start(self):
+        commits = self.small_history()
+        self.init(providers={'fake': provider_spec()})
+        result = self.run_ai()
+        self.assertIn('import', result)
+        self.assertTrue(result['complete'], result)
+        return commits
 
-        # Run 1: a flaky model request and a flaky forge request fail; every other commit still succeeds.
-        first = self.tuj("run", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0", ok=4)
-        self.assertEqual(first["status"], "incomplete")
-        self.assertFalse(first["complete"])
-        cov = first["coverage"]
-        self.assertEqual(cov["commits_in_scope"], 5)
-        self.assertEqual(cov["ai_analysis"]["failed"], 1, "the flaky commit failed")
-        self.assertGreaterEqual(cov["ai_analysis"]["analyzed"], 4, "later commits were analysed regardless")
-        self.assertEqual(cov["external_evidence"]["failed"], 1, "the forge outage on #8 was recorded")
-        self.assertEqual(cov["external_evidence"]["complete"], 1, "PR #7 evidence was collected")
-        failures = self.tuj("failures")
-        self.assertEqual({(i["sha"], i["stage"]) for i in failures["items"]}, {(self.c2, "analysis"), (self.c3, "external")})
-        self.assertEqual(self.repo.state_fingerprint(), before, "the target repository was not modified")
+    def test_default_run_imports_actual_records_and_historical_revisions(self):
+        c1, c2, c3, c4 = self.start()
+        store = self.canonical()
+        self.assertFalse(store.errors)
+        self.assertFalse(validate(snapshot(self.repo.path, working=True), snapshot(self.repo.path, revision='HEAD')))
+        auth = next(v for v in store.current('intent').values() if v['title']=='Add auth check')
+        self.assertEqual(auth['status'], 'retired')
+        self.assertGreaterEqual(auth['revision'], 3)
+        self.assertEqual(auth['reconstruction']['source_commits'], [c1,c2])
+        self.assertEqual(auth['reconstruction']['history']['ended_by'][0]['commit'], c3)
+        self.assertEqual(auth['reconstruction']['verification'], 'pending')
+        bindings = [v for v in store.current('binding').values() if v['intent_id']==auth['id']]
+        self.assertEqual(len(bindings), 2)
+        self.assertTrue(all(v['status']=='historical' and v['verification']['status']=='pending' for v in bindings))
+        self.assertIn(b"return t == 'x'", store.objects[bindings[0]['target']['source']])
+        answer = self.query('explain', 'auth.py:2')
+        self.assertEqual(answer['applicable'], [])
+        self.assertIn(auth['id'], {v['intent']['id'] for v in answer['historical']})
+        self.assertNotIn('retrospective', answer)
+        history = self.query('history','auth.py:2')
+        self.assertIn(c1, json.dumps(history))
+        self.assertIn(c2, json.dumps(history))
+        self.assertTrue(history['intent_revisions'])
 
-        # Retry only the failed items. The model is still flaky: this time extraction succeeds but linking fails.
-        calls_before = len(self.calls())
-        second = self.tuj("retry", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0", ok=4)
-        self.assertTrue(second["coverage"]["analysis_complete"] and second["coverage"]["external_complete"])
-        self.assertEqual([(i["sha"], i["stage"]) for i in second["coverage"]["incomplete_items"]], [(self.c2, "link")])
-        third = self.tuj("retry", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0")
-        self.assertEqual(third["status"], "complete", third["coverage"]["incomplete_items"])
-        self.assertTrue(third["coverage"]["complete"])
-        self.assertLessEqual(len(self.calls()) - calls_before, 8, "retries touched only the failed commit")
+    def test_results_survive_cache_deletion_and_clone(self):
+        self.start()
+        before = self.query('history','auth.py:2')
+        shutil.rmtree(self.state)
+        # No second store is required by any normal intent query.
+        self.assertEqual(before, self.query('history','auth.py:2'))
+        self.repo.git('add','.intent')
+        self.repo.git('commit','-qm','import reconstructed history')
+        clone = self.tmp / 'clone'
+        self.repo.git('clone','-q',str(self.repo.path),str(clone))
+        result = cli.query(clone,argparse.Namespace(command='history',location='auth.py:2',at=None))
+        self.assertEqual(result['intent_revisions'], before['intent_revisions'])
+        self.assertFalse((clone/'.intent/cache').exists())
+        self.assertFalse(validate(snapshot(clone,working=True), snapshot(clone,revision='HEAD')))
 
-        # The decision timeline: introduced, refined with PR evidence, then reversed.
+    def test_repeated_run_is_idempotent_and_reanalysis_appends(self):
+        c1,*_ = self.start()
+        before = self.records()
+        calls = len(self.calls())
+        result = self.run_ai()
+        self.assertTrue(result['import']['unchanged'])
+        self.assertEqual(before,self.records())
+        self.assertEqual(len(self.calls()),calls)
+        self.repo.git('add','.intent')
+        self.repo.git('commit','-qm','import')
+        # A changed analysis adds revisions rather than rewriting prior records.
+        config = self.store().config()
+        old = next(iter(self.graph().nodes.values()))
+        changed = copy.deepcopy(old)
+        changed['findings_data'][0]['statement'] += ' Clarified by reanalysis.'
         graph = self.graph()
-        by_title = {n["title"]: n for n in graph.nodes.values()}
-        auth = by_title["Add auth check"]
-        self.assertEqual(auth["lifecycle"], "reversed")
-        self.assertEqual([t["commit"] for t in auth["timeline"]], [self.c1, self.c2])
-        self.assertEqual(auth["ended_by"][0]["commit"], self.c4)
-        self.assertIn("github:127.0.0.1/acme/widgets#7", auth["resource_keys"])
+        graph.nodes[old['id']] = changed
+        result = importer.import_history(__import__('intentlib.trueup.gitscan',fromlist=['Repo']).Repo(self.repo.path),graph,
+                                         self.store().manifest(),self.tuj('status')['coverage'])
+        self.assertTrue(result['intents'])
+        after = self.records()
+        for p,data in before.items():
+            if p!='manifests/current.json': self.assertEqual(after[p],data)
 
-        # Query a file: retrospective claims with evidence, labeled non-authoritative.
-        section = self.tuj("query", "auth.py:2", "--detail")
-        self.assertEqual(section["authority"], "non-authoritative")
-        titles = [d["title"] for d in section["discoveries"]]
-        self.assertIn("Add auth check", titles)
-        discovery = next(d for d in section["discoveries"] if d["title"] == "Add auth check")
-        evidence_refs = {e["ref"] for f in discovery["findings"] for e in f["evidence"]}
-        self.assertIn("C0", evidence_refs)
-        links = {e["link"] for f in discovery["findings"] for e in f["evidence"] if e["link"]}
-        self.assertTrue(any(l.startswith("git:commit/") for l in links))
-        self.assertEqual(discovery["historical_lifecycle"], "reversed")
-        self.assertEqual(discovery["present_applicability"]["status"], "ended-in-history")
+    def test_import_and_queries_isolate_ambient_git_locations_and_external_programs(self):
+        other=GitRepo(self.tmp/'other')
+        other_sha=other.commit('Outside',{'a.py':'outside'})
+        sha=self.repo.commit('Inside',{'a.py':'inside'})
+        marker=self.tmp/'executed'
+        script=self.tmp/'fsmonitor.sh'
+        script.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
+        script.chmod(0o755)
+        self.repo.git('config','core.fsmonitor',str(script))
+        env={'GIT_DIR':str(other.path/'.git'),'GIT_WORK_TREE':str(other.path),
+             'GIT_COMMON_DIR':str(other.path/'.git'),'GIT_INDEX_FILE':str(other.path/'.git/index'),
+             'GIT_OBJECT_DIRECTORY':str(other.path/'.git/objects'),
+             'GIT_ALTERNATE_OBJECT_DIRECTORIES':str(other.path/'.git/objects')}
+        with mock.patch.dict(os.environ,env):
+            self.init(providers={'fake':provider_spec()})
+            result=self.run_ai()
+            self.assertTrue(result['import']['intents'])
+            self.assertEqual(self.tuj('list')['intents'][0]['title'],'Inside')
+            self.assertEqual(self.tuj('query','a.py:1')['historical'][0]['intent']['title'],'Inside')
+        self.assertFalse(marker.exists(),'canonical Git calls must keep true-up external-program isolation')
+        self.repo.git('config','core.fsmonitor','false')
+        self.assertEqual(other.head(),other_sha)
+        intent=next(iter(self.canonical().current('intent').values()))
+        self.assertEqual(intent['reconstruction']['source_commits'],[sha])
+        from intentlib.core import _GIT_CONTEXT
+        self.assertIsNone(_GIT_CONTEXT.get(),'the ordinary canonical CLI must retain its normal Git environment')
 
-        # Adopt intentctl AFTER the true-up; canonical records start from the unknown-provenance baseline.
-        self.adopt_intentctl()
-        canonical_before = self.intent_bytes()
-        explain = self.ctl("explain", "auth.py:1")
-        self.assertEqual(explain["applicable"], [], "nothing canonical governs this code yet")
-        self.assertIn("retrospective", explain)
-        self.assertEqual(explain["retrospective"]["authority"], "non-authoritative")
-        self.assertEqual(self.ctl("explain", "auth.py:1", "--no-retrospective").get("retrospective"), None)
-        history = self.ctl("history", "auth.py:1")
-        self.assertEqual(history["baseline_provenance"], "unknown")
-        self.assertEqual(history["intent_revisions"], [])
-        self.assertTrue(history["retrospective"]["discoveries"])
+    def test_default_processing_cache_lives_under_intent_and_results_are_versioned(self):
+        self.repo.commit('Add module',{'module.py':'x=1\n'})
+        self.init(providers={'fake':provider_spec()}, state=False)
+        result = self.tuj('run','--provider','fake','--acknowledge-data-sharing','--backoff-base','0',state=False)
+        self.assertTrue(result['import']['intents'])
+        self.assertTrue((self.repo.path/'.intent/cache/trueup/meta.json').exists())
+        status = self.repo.git('status','--porcelain','--untracked-files=all').stdout.decode()
+        self.assertIn('.intent/intents/',status)
+        self.assertNotIn('.intent/cache/',status)
+        self.assertFalse((self.repo.path/'.git/intent-trueup').exists())
 
-        # Review and selective promotion.
-        node_live = by_title["Add logging module"]
-        node_ended = auth
-        _, _, err = self.tu("promote", node_ended["id"], "--confirm", "0" * 64, ok=1)
-        self.assertIn("approve", err, "promotion requires an explicit review first")
-        self.tuj("review", node_ended["id"], "--decision", "reject", "--reviewer", "alice", "--note", "reverted anyway")
-        _, _, err = self.tu("promote", node_ended["id"], "--confirm", "0" * 64, ok=1)
-        self.assertIn("approve", err)
-
-        self.tuj("review", node_live["id"], "--decision", "approve", "--reviewer", "alice", "--note", "matches my memory")
-        shown = self.tuj("show", node_live["id"])
-        digest = shown["review"]["node_hash"]
-        self.tu("promote", node_live["id"], "--confirm", "f" * 64, ok=1)
-        dry = self.tuj("promote", node_live["id"], "--confirm", digest, "--bind", "log.py", "--dry-run")
-        self.assertTrue(dry["dry_run"])
-        self.assertEqual(dry["binding_status"], "historical")
-        self.assertEqual(self.intent_bytes(), canonical_before, "dry run changes nothing")
-        _, _, err = self.tu("promote", node_live["id"], "--confirm", digest, "--bind", "log.py", "--binding-status", "active", ok=1)
-        self.assertIn("applicability-rationale", err)
-
-        result = self.tuj("promote", node_live["id"], "--confirm", digest, "--bind", "log.py", "--key", "logging-module")
-        self.assertEqual(len(result["events"]), 2)
-        self.repo.git("add", ".intent")
-        self.assertEqual(self.ctl("validate").get("valid"), True)
-        self.assertEqual(self.ctl("validate", "--staged").get("valid"), True)
-        self.repo.git("commit", "-qm", "record reviewed retrospective intent")
-
-        after = self.intent_bytes()
-        for name, data in canonical_before.items():
-            if name == "manifests/current.json":
-                continue
-            self.assertEqual(after[name], data, f"existing canonical record {name} was rewritten")
-        self.assertEqual(after["baseline.json"], canonical_before["baseline.json"], "the immutable baseline is untouched")
-        intent = self.ctl("show-intent", result["intent_id"])
-        self.assertEqual(intent["kind"], "retrospective")
-        self.assertIn("NOT captured when the change was made", intent["rationale"])
-        binding = self.ctl("show-binding", result["binding_ids"][0])
-        self.assertEqual(binding["status"], "historical")
-        self.assertEqual(binding["verification"]["status"], "pending")
-        events = [e for e in (self.repo.path / ".intent" / "events").glob("*.json") if e.stem in result["events"]]
-        self.assertEqual(len(events), 2)
-        for path in events:
-            event = json.loads(path.read_text())
-            self.assertEqual(event["provenance"], "unknown")
-            attestations = [v for v in event["verification"] if v["kind"] == "retrospective-trueup"]
-            self.assertTrue(attestations and attestations[0]["result"].startswith("NOT verified"))
-
-        # A historical binding records the association but does not govern edits; the ended decision was not promoted.
-        governed = self.ctl("explain", "log.py:1")
-        self.assertEqual(governed["applicable"], [])
-        self.assertEqual(self.ctl("explain", "auth.py:1")["applicable"], [])
-        self.assertEqual(self.tuj("show", node_live["id"])["promoted"]["complete"], True)
-        _, _, err = self.tu("promote", node_live["id"], "--confirm", digest, "--key", "other-key", ok=1)
-        self.assertIn("already promoted", err)
-
-    def test_active_promotion_requires_rationale_and_ended_decisions_cannot_be_active(self):
+    def test_import_never_changes_source_index_or_git_history(self):
         self.small_history()
-        self.init(providers={"fake": provider_spec()})
-        self.tuj("run", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0")
-        nodes = {n["title"]: n for n in self.graph().nodes.values()}
-        ended, live = nodes["Add auth check"], nodes["Add b module"]
-        self.adopt_intentctl()
-        for node in (ended, live):
-            self.tuj("review", node["id"], "--decision", "approve", "--reviewer", "bob")
-        ended_hash = self.tuj("show", ended["id"])["review"]["node_hash"]
-        live_hash = self.tuj("show", live["id"])["review"]["node_hash"]
-        _, _, err = self.tu("promote", ended["id"], "--confirm", ended_hash, "--bind", "auth.py", "--binding-status", "active",
-                            "--applicability-rationale", "still applies", ok=1)
-        self.assertIn("ended in history", err)
-        done = self.tuj("promote", live["id"], "--confirm", live_hash, "--bind", "b.py", "--binding-status", "active",
-                        "--applicability-rationale", "b.py must keep initialising x", "--relationship", "constrained-by")
-        self.assertEqual(len(done["events"]), 1)
-        self.repo.git("add", ".intent")
-        self.assertTrue(self.ctl("validate", "--staged")["valid"])
-        self.repo.git("commit", "-qm", "promote")
-        governed = self.ctl("explain", "b.py:1")
-        self.assertEqual(len(governed["applicable"]), 1, "an explicit active binding does govern")
-        self.assertEqual(governed["applicable"][0]["binding"]["verification"]["status"], "pending")
-        # ended decisions may be promoted only as historical context
-        hist = self.tuj("promote", ended["id"], "--confirm", ended_hash, "--bind", "auth.py", "--key", "ended-auth")
-        self.assertEqual(hist["intent"]["status"], "superseded" if hist["intent"]["status"] == "superseded" else "retired")
+        before = self.repo.head(), self.repo.git('ls-files','-s').stdout, self.repo.git('diff','HEAD').stdout
+        self.init(providers={'fake':provider_spec()})
+        self.run_ai()
+        after = self.repo.head(), self.repo.git('ls-files','-s').stdout, self.repo.git('diff','HEAD').stdout
+        self.assertEqual(before,after)
 
-    def test_promotion_refuses_without_intentctl_staged_source_or_changed_discovery(self):
-        self.small_history()
-        self.init(providers={"fake": provider_spec()})
-        self.tuj("run", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0")
-        node = [n for n in self.graph().nodes.values() if n["title"] == "Add b module"][0]
-        self.tuj("review", node["id"], "--decision", "approve", "--reviewer", "carol")
-        digest = self.tuj("show", node["id"])["review"]["node_hash"]
-        _, _, err = self.tu("promote", node["id"], "--confirm", digest, ok=1)
-        self.assertIn("not adopted intentctl", err)
-        self.adopt_intentctl()
-        self.repo.write("b.py", "x = 2\n")
-        self.repo.git("add", "b.py")
-        _, _, err = self.tu("promote", node["id"], "--confirm", digest, "--bind", "b.py", ok=1)
-        self.assertIn("staged source changes", err)
-        self.repo.git("reset", "-q", "b.py")
-        self.repo.git("checkout", "--", "b.py")
-        _, _, err = self.tu("promote", node["id"], "--confirm", digest, "--bind", "missing.py", ok=1)
-        self.assertIn("not present in the index", err)
+    def test_partial_failure_imports_supported_context_and_records_coverage(self):
+        self.repo.commit('Good',{'a.py':'x=1\n'})
+        self.repo.commit('Bad [ai-fail]',{'b.py':'x=1\n'})
+        self.init(providers={'fake':provider_spec()})
+        result = self.run_ai(ok=4)
+        self.assertFalse(result['complete'])
+        self.assertTrue(result['import']['intents'])
+        store = self.canonical()
+        event = store.events[store.manifest['events'][-1]]
+        coverage = json.loads(event['verification'][0]['result'])
+        self.assertFalse(coverage['complete'])
+        self.assertEqual(coverage['ai_analysis']['failed'],1)
+        self.assertTrue(self.query('explain','a.py:1')['historical'])
 
-    def test_everything_is_a_noop_when_unused(self):
-        """intentctl behaves exactly as before when no true-up store exists, and never imports the true-up code."""
-        self.small_history()
-        self.adopt_intentctl()
-        out = self.ctl("explain", "auth.py:1")
-        self.assertNotIn("retrospective", out)
-        env = {**os.environ, **GIT_ENV}
-        probe = subprocess.run([sys.executable, "-c",
-                                "import sys; sys.path.insert(0, 'tools'); import intentlib.cli as c; "
-                                "print('intentlib.trueup' in sys.modules)"], cwd=self.repo.path, env=env, stdout=subprocess.PIPE)
-        self.assertEqual(probe.stdout.decode().strip(), "False")
-        self.assertTrue(self.ctl("validate")["valid"])
-        self.assertTrue(self.ctl("doctor")["valid"])
+    def test_dry_run_has_no_canonical_records_and_no_ai_only_inspects(self):
+        self.repo.commit('Initial',{'a.py':'1\n'})
+        self.init(providers={'fake':provider_spec()})
+        self.run_ai('--dry-run')
+        self.assertFalse((self.repo.path/'.intent/config.json').exists())
+        self.tuj('run','--no-ai','--network','off')
+        self.assertFalse((self.repo.path/'.intent/config.json').exists())
 
-    def test_broken_store_never_breaks_canonical_queries(self):
-        self.small_history()
-        self.adopt_intentctl()
-        state = self.repo.path / ".git" / "intent-trueup"
-        self.tuj("init", "--repo", str(self.repo.path), state=False)
-        (state / "meta.json").write_text("{not json")
-        out = self.ctl("explain", "auth.py:1", state=state)
-        self.assertEqual(out["applicable"], [])
-        self.assertIn("skipped", out["retrospective"]["error"])
-        self.assertEqual(self.ctl("explain", "auth.py:1", "--no-retrospective", state=state).get("retrospective"), None)
+    def test_dirty_source_refuses_import_without_losing_analysis(self):
+        self.repo.commit('Initial',{'a.py':'1\n'})
+        self.init(providers={'fake':provider_spec()})
+        self.repo.write('a.py','2\n')
+        result = self.run_ai(ok=4)
+        self.assertIn('clean source worktree',result['import_error'])
+        self.assertFalse(result['complete'])
+        self.assertTrue(self.graph().nodes)
+        self.repo.git('checkout','--','a.py')
+        result = self.run_ai()
+        self.assertTrue(result['import']['intents'])
+
+    def test_interrupted_canonical_publish_recovers_without_duplicate_records(self):
+        self.repo.commit('Initial',{'a.py':'1\n'})
+        self.init(providers={'fake':provider_spec()})
+        fired = []
+        def crash(name):
+            if name=='import:after_record_write' and not fired:
+                fired.append(True)
+                raise RuntimeError('simulated crash')
+        with mock.patch.object(importer,'fault',side_effect=crash):
+            with self.assertRaises(RuntimeError): self.run_ai()
+        self.assertTrue((self.repo.path/'.intent/drafts/trueup-import.json').exists())
+        result = self.run_ai()
+        self.assertTrue(result['complete'])
+        store = self.canonical()
+        self.assertEqual(len(store.intents),1)
+        self.assertFalse(store.errors)
+        self.assertFalse((self.repo.path/'.intent/drafts/trueup-import.json').exists())
+
+    def test_existing_manual_records_and_baseline_are_immutable(self):
+        self.repo.commit('Initial',{'a.py':'1\n'})
+        cli.initialize(self.repo.path,no_hooks=True)
+        self.repo.git('add','.intent')
+        self.repo.git('commit','-qm','adopt')
+        cli.capture(self.repo.path,argparse.Namespace(key='manual',kind='manual',description='Human reason',rationale='Existing context',provenance='unknown'))
+        intent=cli.add_intent(self.repo.path,argparse.Namespace(command='intent-create',event='manual',key='manual',status='active',kind='requirement',severity=None,
+            title='Manual intent',description='Keep a stable',rationale='Human supplied',requirement=[],constraint=[],related=[]))
+        cli.declare(self.repo.path,argparse.Namespace(event='manual',intent=intent['id'],binding=None,action='introduce',provenance=None))
+        cli.finalize(self.repo.path,argparse.Namespace(key='manual'))
+        self.repo.git('add','.intent'); self.repo.git('commit','-qm','manual context')
+        before = self.records()
+        self.init(providers={'fake':provider_spec()})
+        self.run_ai()
+        for p,data in before.items():
+            if p!='manifests/current.json': self.assertEqual(self.records()[p],data)
+
+    def test_without_import_normal_commands_never_open_analysis_cache(self):
+        self.repo.commit('Initial',{'a.py':'1\n'})
+        cli.initialize(self.repo.path,no_hooks=True)
+        self.assertNotIn('historical',self.query('explain','a.py:1'))
+        with mock.patch('intentlib.trueup.store.Store.open',side_effect=AssertionError('must not read cache')):
+            self.query('history','a.py:1')
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ImportValidation(TrueUpTest):
+    import_results = True
+
+    def prepared(self):
+        self.repo.commit('Initial', {'a.py':'x=1\n'})
+        cli.initialize(self.repo.path, no_hooks=True)
+        self.repo.git('add','.intent')
+        self.repo.git('commit','-qm','adopt')
+        before = snapshot(self.repo.path, revision='HEAD')
+        self.init(providers={'fake':provider_spec()})
+        self.run_ai()
+        after = snapshot(self.repo.path, working=True)
+        return before, after, CanonicalStore(after)
+
+    def change(self, entries, path, mutate):
+        from intentlib.core import seal
+        value = json.loads(entries[path][1])
+        mutate(value)
+        if 'content_hash' in value:
+            value = seal(value)
+        entries[path] = ('100644', canonical(value)+b'\n')
+
+    def test_import_cannot_create_active_or_verified_bindings(self):
+        before, after, store = self.prepared()
+        binding = next(iter(store.current('binding').values()))
+        path = f".intent/bindings/{binding['id']}/000001.json"
+        for mutate in [lambda b:b.update(status='active'), lambda b:b.update(verification={'status':'verified','method':'AI','evidence':'AI says so'})]:
+            proposed = dict(after)
+            self.change(proposed,path,mutate)
+            self.assertIn('HISTORICAL_IMPORT',{e['code'] for e in validate(proposed,before)})
+
+    def test_import_must_be_explicit_unknown_provenance_and_metadata_only(self):
+        before, after, store = self.prepared()
+        event = next(e for e in store.events.values() if e['kind']=='retrospective-import')
+        path = f".intent/events/{event['id']}.json"
+        for mutate in [lambda e:e.update(kind='manual'), lambda e:e.update(provenance='known')]:
+            proposed = dict(after)
+            self.change(proposed,path,mutate)
+            self.assertIn('HISTORICAL_IMPORT',{e['code'] for e in validate(proposed,before)})
+        proposed = dict(after)
+        proposed['a.py']=('100644',b'x=2\n')
+        self.assertTrue(validate(proposed,before),'historical import cannot account for a new source edit')
+
+    def test_generated_metadata_and_blob_snapshots_are_not_model_evidence(self):
+        self.repo.commit('Real source',{'a.py':'x=1\n'})
+        marker='ENCODED_PRIVATE_SOURCE_SNAPSHOT'
+        sha=self.repo.commit('Record imported history', {'.intent/objects/fake.json':marker})
+        self.init(providers={'fake':provider_spec()})
+        self.run_ai('--dry-run')
+        rec=self.store().commit(sha)
+        self.assertEqual(rec['analysis']['status'],'no_intent_found')
+        self.assertEqual(len(self.calls()),1,'metadata-only commits never invoke the model')
+        from intentlib.trueup.gitscan import Repo, inspect_commit
+        from intentlib.trueup.analysis import DEFAULT_LIMITS
+        info=inspect_commit(Repo(self.repo.path),sha,DEFAULT_LIMITS)
+        self.assertEqual(info['files'],[])
+        self.assertIsNone(info.get('unattributed_patch'))
+
+    def test_out_of_range_historical_model_target_is_recorded_as_a_gap(self):
+        sha=self.repo.commit('Real source',{'a.py':'one\ntwo'})
+        from intentlib.trueup.gitscan import Repo
+        limitations=[]
+        target=importer._binding_target(Repo(self.repo.path),{'commit':sha},'a.py',[1,999],1000,limitations)
+        self.assertIsNone(target)
+        self.assertTrue(limitations)
+        self.assertIsNotNone(importer._binding_target(Repo(self.repo.path),{'commit':sha},'a.py',[1,2],1000,[]))
+
+    def test_failed_import_is_visible_in_status_separately_from_analysis(self):
+        self.repo.commit('Real source',{'a.py':'one'})
+        self.init(providers={'fake':provider_spec()})
+        self.repo.write('a.py','dirty')
+        self.run_ai(ok=4)
+        status=self.tuj('status')
+        self.assertTrue(status['coverage']['analysis_complete'])
+        self.assertEqual(status['import']['status'],'failed')
+        self.assertFalse(status['complete'])
+
+
+class CacheSafety(TrueUpTest):
+    def test_repository_symlink_cannot_redirect_default_cache_writes(self):
+        outside=self.tmp/'outside'
+        outside.mkdir()
+        (self.repo.path/'.intent').symlink_to(outside,target_is_directory=True)
+        self.repo.commit('Initial',{'a.py':'one'})
+        self.tu('init',state=False,ok=1)
+        self.assertEqual(list(outside.iterdir()),[])
+
+    def test_writer_lock_symlink_cannot_truncate_another_file(self):
+        from intentlib.trueup.store import Store
+        victim=self.tmp/'keep'
+        victim.write_bytes(b'untouched')
+        cache=self.tmp/'cache'
+        cache.mkdir()
+        (cache/'lock').symlink_to(victim)
+        with self.assertRaises(TrueUpError): Store(cache).acquire()
+        self.assertEqual(victim.read_bytes(),b'untouched')

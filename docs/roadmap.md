@@ -14,7 +14,7 @@
 - [x] Per-worktree writer lock for mutating commands, with a multi-process lost-update test.
 - [x] Versioned JSON command output and docs-as-tests for every documented command and flag.
 - [x] Memoized per-pair byte diffs; validating one pending event that rewrites `cli.py` and `core.py` exceeded 290 seconds (aborted); two such events now validate in about 95 seconds.
-- [x] True-up: resumable retrospective discovery of non-authoritative pseudo-intent from Git and forge history, with reviewed promotion into canonical records ([docs/trueup.md](trueup.md)).
+- [x] True-up: resumable reconstruction of Git and forge history directly into canonical `.intent` records, with evidence, uncertainty and pending verification ([docs/trueup.md](trueup.md)).
 
 ## Repository adoption goals
 
@@ -46,10 +46,10 @@ communication to other agents and to humans reviewing why a change happened.
 
 ## True-up follow-ups
 
-- Authenticated, signed reviews (current reviews are local and unauthenticated attributions).
+- Authenticated, signed independent verification of reconstructed intent.
 - Additional forges (Gitea, Bitbucket) and review-thread resolution state.
 - Incremental `extend` for rewritten history with explicit reconciliation of discoveries tied to dropped commits.
-- Independent verification records that can upgrade a promoted binding from `pending`.
+- Independent verification records that can upgrade an imported binding from `pending`.
 - Benchmarking on multi-hundred-thousand-commit histories, and optional use of `cat-file --batch` pipelines for inspection.
 
 ## Open architectural questions

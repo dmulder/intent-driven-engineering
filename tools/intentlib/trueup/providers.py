@@ -238,7 +238,7 @@ class Provider:
             if uses_prompt_arg and len(prompt.encode()) > MAX_ARGV_PROMPT_BYTES:
                 last = ProviderResult(False, error=CONFIG, message="prompt too large for an argv-style invocation", invocation=index)
                 continue
-            workdir = tempfile.mkdtemp(prefix="intent-trueup-")
+            workdir = tempfile.mkdtemp(prefix="intent-ai-")
             try:
                 output_file = os.path.join(workdir, "answer.txt")
                 prompt_file = os.path.join(workdir, "prompt.txt")

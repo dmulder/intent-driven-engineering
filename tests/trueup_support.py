@@ -117,6 +117,9 @@ class TrueUpTest(unittest.TestCase):
     # -- CLI ---------------------------------------------------------------------------------
     def tu(self, *args, ok=True, repo=None, state=True):
         argv = list(args)
+        # Pipeline unit tests isolate analysis; import integration tests exercise the public default.
+        if argv and argv[0] in ('run', 'retry', 'reanalyze') and not getattr(self, 'import_results', False) and '--dry-run' not in argv:
+            argv.append('--dry-run')
         if "--repo" not in argv:
             argv += ["--repo", str(repo or self.repo.path)]
         if state and "--state-dir" not in argv:

@@ -105,6 +105,13 @@ Local hooks and local installed tools are convenience enforcement. Trusted CI mu
 use a reviewed tool version. Structural validation cannot prove intent truthfulness;
 humans should review reasons, requirements, applicability, and verification evidence.
 
-## Optional retrospective leads
+## Reconstruct historical intent
 
-After adoption, `intentctl trueup` can reconstruct evidence-cited, non-authoritative leads about why existing code is the way it is, from Git history and (optionally) forge discussions. It stores them outside `.intent/`, never as canonical intent, and its results are promoted only through an explicit review. It does not replace the adoption backlog from `audit` and `reconcile`. See [true-up](trueup.md).
+`intentctl trueup` can adopt an uninstrumented project and import evidence-cited
+reconstruction from Git history and optional forge discussions directly into actual
+`.intent` records. Normal `explain`, `history`, and `report` expose that context to
+agents, including original commits, uncertainty and pending verification. Historical
+bindings do not silently impose present-day constraints or erase the unknown
+provenance backlog reported by `audit` and `reconcile`. Processing checkpoints live
+in ignored `.intent/cache/trueup/`; the imported data survives deleting that cache.
+See [true-up](trueup.md).

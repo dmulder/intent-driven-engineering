@@ -261,7 +261,15 @@ class Engine:
         elif rec["external"]["status"] == "pending":
             rec["external"] = {"status": "not_requested", "references": [], "resources": [], "limitations": []}
             self.store.put_commit(rec)
-        if need_ai:
+        if need_ai and info.get("metadata_only"):
+            attempt_no = len(self.store.list_nested("attempts", sha_)) + 1
+            self.store.put_nested("attempts", sha_, f"{attempt_no:06d}",
+                                  {"commit": sha_, "attempt": attempt_no, "status": "no_intent_found", "findings": [],
+                                   "limitations": [], "reason": "canonical metadata-only commit; not analysed as source"})
+            rec["analysis"] = {"status": "no_intent_found", "attempt": attempt_no, "findings": 0}
+            rec["link"] = {"status": "not_applicable"}
+            self.store.put_commit(rec)
+        elif need_ai:
             self._analyse(item, rec, info)
         return rec
 

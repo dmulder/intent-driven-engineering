@@ -45,9 +45,16 @@ def sha(value):
     return hashlib.sha256(data).hexdigest()
 
 
+def assert_safe_path(path):
+    path = Path(path)
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise FatalStateError(f"refusing true-up cache access through symlink: {path}")
+
+
 def atomic_write(path, data):
     """Write bytes durably: temp file in the same directory, fsync, rename, fsync directory."""
     path = Path(path)
+    assert_safe_path(path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
@@ -82,6 +89,7 @@ def write_json(path, value):
 
 def read_json(path, default=None):
     path = Path(path)
+    assert_safe_path(path)
     try:
         data = path.read_bytes()
     except FileNotFoundError:

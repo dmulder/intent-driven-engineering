@@ -132,11 +132,11 @@ class ScopeAndOrder(TrueUpTest):
         self.assertEqual(self.repo.state_fingerprint(), before)
         self.assertTrue(str(self.state).startswith(str(self.tmp)), "state lives outside the scanned worktree here (explicit --state-dir)")
 
-    def test_default_state_dir_is_inside_git_dir_not_worktree(self):
+    def test_default_cache_is_ignored_under_intent(self):
         self.small_history()
         out = self.tuj("init", state=False)
-        self.assertEqual(Path(out["state_dir"]), (self.repo.path / ".git" / "intent-trueup").resolve())
-        self.assertEqual(self.repo.git("status", "--porcelain").stdout, b"")
+        self.assertEqual(Path(out["state_dir"]), (self.repo.path / ".intent/cache/trueup").resolve())
+        self.assertNotIn(b"cache/", self.repo.git("status", "--porcelain", "--untracked-files=all").stdout)
 
     def test_repository_config_cannot_make_scan_run_external_programs(self):
         marker = self.tmp / "executed"
