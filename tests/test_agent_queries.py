@@ -193,6 +193,37 @@ class AgentQueryTests(RepoTest):
         self.assertEqual(self.ctl("context", "tasks.py")["related_intents"][0]["id"], guard)
         self.assertNotEqual(policy, guard)
 
+    def test_doctor_reports_missing_intent_heads_with_repair_guidance(self):
+        intent, binding = self.bound()
+        (self.root / ".intent/intents" / intent / "000001.json").unlink()
+        result = self.ctl("doctor", ok=False)
+        self.assertFalse(result["valid"])
+        self.assertTrue(any(e["code"] == "REFERENCE" and e["path"] == intent for e in result["errors"]))
+        self.assertFalse(any(e["code"] == "OPERATION" for e in result["errors"]))
+        self.assertIn("repair", result)
+        self.assertIn("append corrective revisions", result["repair"])
+
+    def test_historical_queries_accept_pre_severity_schema_but_validate_records(self):
+        intent, _ = self.bound()
+        schema_path = ".intent/schema/intent.schema.json"
+        schema = self.read(schema_path)
+        schema["properties"].pop("severity")
+        self.write(schema_path, canonical(schema) + b"\n")
+        self.git("add", schema_path)
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "pre-severity schema snapshot")
+        historical = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.assertIn("SCHEMA_DEFINITION", str(self.ctl("status", ok=False)))
+        for argv in (["status"], ["context", "auth.py"], ["coverage"], ["list-intents"],
+                     ["explain", "auth.py:2"], ["history", "auth.py:2"], ["show-intent", intent]):
+            self.ctl(*argv, "--at", historical)
+        record_path = f".intent/intents/{intent}/000001.json"
+        record = self.read(record_path)
+        record["rationale"] = "tampered without updating the content hash"
+        self.write(record_path, canonical(record) + b"\n")
+        self.git("add", record_path)
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "damaged historical record")
+        self.assertIn("HASH", str(self.ctl("status", "--at", "HEAD", ok=False)))
+
     def test_json_output_is_canonical_without_floats(self):
         self.intent("canon", "canon")
         self.finish("canon")

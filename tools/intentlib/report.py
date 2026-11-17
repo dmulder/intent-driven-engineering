@@ -190,7 +190,8 @@ def freshness(store):
     """Decay signals: Telos found stale rules actively mislead agents, so surface them."""
     intents, bindings = store.current("intent"), store.current("binding")
     live = [b for b in bindings.values() if b["status"] in ACTIVE]
-    stale = [b["id"] for b in live if b["intent_revision"] != intents[b["intent_id"]]["revision"]]
+    stale = [b["id"] for b in live if b["intent_id"] in intents
+             and b["intent_revision"] != intents[b["intent_id"]]["revision"]]
     governing = {b["intent_id"] for b in live}
     orphaned = sorted(i for i, v in intents.items() if v["status"] == "active" and i not in governing)
     counts = {}

@@ -23,6 +23,15 @@ class DiffCacheTests(unittest.TestCase):
         self.assertNotEqual(opcodes(b"abc", b"abd"), opcodes(b"abc", b"xyz"))
         self.assertEqual(opcodes.cache_info().misses, 2)
 
+    def test_validation_revisits_more_than_sixteen_pairs_without_rediffing(self):
+        opcodes.cache_clear()
+        pairs = [(bytes([65 + i]) + b"same old", bytes([65 + i]) + b"same new") for i in range(24)]
+        for old, new in pairs:
+            intervals(("100644", old), ("100644", new))
+        for old, new in pairs:
+            self.assertEqual(map_preserved_range(0, 1, ("100644", old), ("100644", new)), (0, 1))
+        self.assertEqual(opcodes.cache_info().misses, len(pairs))
+
 
 if __name__ == "__main__":
     unittest.main()

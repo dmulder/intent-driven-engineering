@@ -427,7 +427,7 @@ def line_range(data, line):
 
 def query(root, args):
     entries = snapshot(root, revision=args.at) if getattr(args, "at", None) else snapshot(root, working=True)
-    store = Store(entries)
+    store = Store(entries, enforce_schema_definitions=not bool(args.at))
     if store.errors:
         raise IntentError(str(store.errors))
     intents, bindings = store.current("intent"), store.current("binding")

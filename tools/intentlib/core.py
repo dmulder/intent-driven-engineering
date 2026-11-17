@@ -213,7 +213,7 @@ def put_object(root, data):
     return record["id"]
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=None)
 def opcodes(a, b):
     """SequenceMatcher is quadratic on bytes and many bindings share one file diff: compute each pair once."""
     return tuple(difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes())
