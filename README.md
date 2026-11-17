@@ -1,6 +1,6 @@
 # Intent-driven engineering tools
 
-Installable, offline tools for adopting intent-driven engineering in existing Git repositories. Agents maintain explicit reasons for changes so other agents can understand the project and humans can review its decisions. Code, intent, bindings, and logical events evolve independently; Git stores consistent snapshots of all four. The CLI and validator use Python's standard library and Git plumbing. No model, server, runtime Python dependencies, or inline source annotations are required. Install once and run `intentctl` from any supported Git repository, including a nested directory.
+Installable, offline tools for adopting intent-driven engineering in existing Git repositories. Agents maintain explicit reasons for changes so other agents can understand the project and humans can review its decisions. Code, intent, bindings, and logical events evolve independently; Git stores consistent snapshots of all four. The CLI and validator use Python's standard library and Git plumbing. No model, server, runtime Python dependencies, or inline source annotations are required; the optional [true-up](docs/trueup.md) feature can use AI command-line tools and forge APIs only when an operator explicitly asks it to. Install once and run `intentctl` from any supported Git repository, including a nested directory.
 
 **Prototype, not semantic verification.** A successful check proves structural accounting, not that an implementation satisfies its declared intent. See [limitations](docs/git-integration.md) before adopting it.
 
@@ -176,6 +176,22 @@ intentctl validate --range BASE..HEAD
 
 Human output is indented JSON for records, and concise diagnostics for validation. JSON validation returns `valid`, `errors`, stable codes, paths, and messages; failure exits nonzero. `doctor` diagnoses without modifying history. Repair drafts or append corrective records; never overwrite committed revisions.
 
+## Retrofit an existing project: true-up
+
+A repository that never recorded intent can still be queried. `intentctl trueup` reads Git history (and, if you allow it, GitHub/GitLab pull requests, issues and reviews), optionally asks an AI CLI (`claude`, `codex`, `gemini`, `opencode`, or your own command) to extract reasons, decisions, constraints and rejected alternatives, and keeps the result in a **separate, non-authoritative store** under `.git/intent-trueup/`. Discovery does not touch the working tree, the index, history, or `.intent/`. Explicit reviewed `trueup promote` creates canonical metadata in `.intent/`.
+
+```sh
+intentctl trueup init
+intentctl trueup estimate
+intentctl trueup run --no-ai --network off                      # local inspection only, no model, no network
+intentctl trueup run --provider claude --acknowledge-data-sharing --max-commits 20 --network forge
+intentctl trueup status                           # coverage; a run with failures is never "complete"
+intentctl trueup retry --provider claude --acknowledge-data-sharing --network forge
+intentctl trueup query src/auth.py:42             # also shown by `explain`/`history` as a separate section
+```
+
+Runs are resumable and isolate failures per commit. Discoveries are inferred, labelled as such, and become canonical intent only through an explicit `trueup review` and `trueup promote`, which reuse the normal capture/finalize/validate flow and record verification as `pending`. Read [docs/trueup.md](docs/trueup.md) for privacy, cost, configuration and limitations before pointing it at a model.
+
 ## Design and status
 
 - [Architecture and tradeoffs](docs/architecture.md)
@@ -183,6 +199,7 @@ Human output is indented JSON for records, and concise diagnostics for validatio
 - [Validator specification](docs/validator.md)
 - [Git support and limitations](docs/git-integration.md)
 - [Security and trust](docs/security.md)
+- [True-up: retrospective intent discovery](docs/trueup.md)
 - [Reproducible demonstration](docs/demonstration.md)
 - [Roadmap](docs/roadmap.md)
 - [Agent entry point](AGENTS.md) and [mandatory intent protocol](INTENT.md)

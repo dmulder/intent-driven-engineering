@@ -104,3 +104,7 @@ rewrite every repository's hooks.
 Local hooks and local installed tools are convenience enforcement. Trusted CI must
 use a reviewed tool version. Structural validation cannot prove intent truthfulness;
 humans should review reasons, requirements, applicability, and verification evidence.
+
+## Optional retrospective leads
+
+After adoption, `intentctl trueup` can reconstruct evidence-cited, non-authoritative leads about why existing code is the way it is, from Git history and (optionally) forge discussions. It stores them outside `.intent/`, never as canonical intent, and its results are promoted only through an explicit review. It does not replace the adoption backlog from `audit` and `reconcile`. See [true-up](trueup.md).
