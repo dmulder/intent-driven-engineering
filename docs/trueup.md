@@ -23,7 +23,7 @@ intentctl trueup init
 intentctl trueup estimate                 # size from local Git data only
 
 # 2. Free, local-only pass: inspects every commit, records diagnostics, no model, no network.
-intentctl trueup run --no-ai
+intentctl trueup run --no-ai --network off
 
 # 3. Small paid trial, then the full run. Data-sharing acknowledgement is mandatory for non-local providers.
 intentctl trueup run --provider claude --acknowledge-data-sharing --max-commits 20 --network forge
@@ -39,7 +39,7 @@ intentctl trueup query src/auth.py:42 --detail
 intentctl trueup retry --provider claude --acknowledge-data-sharing --network forge
 ```
 
-`init`, `estimate`, `status`, `report`, `failures`, `show`, `list`, `tree`, `query`, `providers`, `verify` never call a model or the network. Testing an installation needs none: `run --no-ai` exercises the whole pipeline locally, and `providers` checks which provider executables exist without invoking them.
+`init`, `estimate`, `status`, `report`, `failures`, `show`, `list`, `tree`, `query`, `providers`, `verify` never call a model or the network. Testing an installation needs none: `run --no-ai --network off` exercises the whole pipeline locally, and `providers` checks which provider executables exist without invoking them.
 
 ## Where state lives
 
@@ -68,7 +68,7 @@ When `--network forge` is selected, the forge stage fetches pull/merge requests,
 - `--forge-association auto|always|never` controls whether a commit is associated with a PR/MR without an explicit reference (`auto` asks the primary forge for the PRs/MRs containing the commit only when the commit text has no explicit reference; `always` always asks; `never` uses explicit references only).
 - Secrets (tokens, `Authorization` values, URL credentials, secret-looking query parameters) are redacted before storage, prompts and logs.
 
-`--network off` (the default recorded at `init`) means no network request is made at all; the run is simply labelled as lacking external evidence, and that shows in coverage.
+`--network off` (the default recorded at `init`) disables forge access; the run is labelled as lacking external evidence, and that shows in coverage. Remote AI providers can still receive repository evidence when AI is enabled. Use both `--network off` and `--no-ai` for local-only operation, even if the stored network policy enables forge access.
 
 ## AI analysis
 

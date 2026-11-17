@@ -558,17 +558,15 @@ def fetch_resource(client, candidate, limits):
                 out["merge_commit_sha"] = pr.get("merge_commit_sha")
             except ForgeError as exc:
                 out["limits"]["incomplete"].append(f"pull request details unavailable: {exc}")
+                out["limits"]["retryable"] = out["limits"].get("retryable", False) or exc.retryable
             endpoints += [("review", f"/repos/{repo}/pulls/{number}/reviews"),
                           ("review-comment", f"/repos/{repo}/pulls/{number}/comments")]
         for kind, path in endpoints:
             try:
                 items, truncated, note = client.paginate(path, max_items=limits["max_comments_per_resource"])
             except ForgeError as exc:
-                if isinstance(exc, (RateLimited, ForgeUnavailable)):
-                    out["limits"]["incomplete"].append(f"{kind}s not retrieved: {exc}")
-                    out["limits"]["retryable"] = True
-                else:
-                    out["limits"]["incomplete"].append(f"{kind}s not retrieved: {exc}")
+                out["limits"]["incomplete"].append(f"{kind}s not retrieved: {exc}")
+                out["limits"]["retryable"] = out["limits"].get("retryable", False) or exc.retryable
                 continue
             if truncated:
                 out["limits"]["incomplete"].append(f"{kind}s truncated" + (f" ({note})" if note else ""))
@@ -606,8 +604,7 @@ def fetch_resource(client, candidate, limits):
                                                 line=((item.get("position") or {}).get("new_line"))))
         except ForgeError as exc:
             out["limits"]["incomplete"].append(f"notes not retrieved: {exc}")
-            if isinstance(exc, (RateLimited, ForgeUnavailable)):
-                out["limits"]["retryable"] = True
+            out["limits"]["retryable"] = out["limits"].get("retryable", False) or exc.retryable
     total = len(out["body"] or "")
     kept = []
     for comment in out["comments"]:
@@ -615,6 +612,8 @@ def fetch_resource(client, candidate, limits):
         if total > limits["max_resource_chars"]:
             out["limits"]["incomplete"].append("discussion truncated at the per-resource character limit")
             break
+        if comment.get("truncated"):
+            out["limits"]["incomplete"].append("comment truncated at the per-comment character limit")
         kept.append(comment)
     out["comments"] = kept
     out["status"] = "partial" if out["limits"]["incomplete"] else "ok"
@@ -663,7 +662,7 @@ class ForgeEvidence:
         return sha(key.encode())[:40]
 
     def lookup(self, candidates):
-        """Resolve one reference's candidates in order. Returns (resource or None, attempts)."""
+        """Resolve one reference's candidates in order. Returns (resource or None, attempts, resolving forge or None)."""
         attempts = []
         for candidate in candidates:
             key = resource_key(candidate["forge"], candidate["number"], candidate["kind_hint"])
@@ -671,10 +670,10 @@ class ForgeEvidence:
             attempts.append({"key": key, "status": resource["status"], "error": resource.get("error")})
             if resource["status"] in ("ok", "partial"):
                 resource = {**resource, "resolved_via_alias": candidate["forge"].get("role") == "alias" or candidate is not candidates[0]}
-                return resource, attempts
+                return resource, attempts, candidate["forge"]
             if resource["status"] in ("rate_limited", "error"):
-                return resource, attempts  # do not mask a retryable failure by trying aliases
-        return (resource if candidates else None), attempts
+                return resource, attempts, candidate["forge"]  # do not mask a retryable failure by trying aliases
+        return (resource if candidates else None), attempts, None
 
     def _get(self, key, candidate):
         with self._lock_for(key):
@@ -753,7 +752,7 @@ class ForgeEvidence:
                 if ref["form"] != "external-url":
                     failures += 1
                 continue
-            resource, attempts = self.lookup(candidates)
+            resource, attempts, resolved_forge = self.lookup(candidates)
             record.update(attempted=attempts)
             if resource is None or resource["status"] not in ("ok", "partial"):
                 record.update(resolution=resource["status"] if resource else "unresolved", reason=(resource or {}).get("error"))
@@ -772,9 +771,7 @@ class ForgeEvidence:
                 out["limitations"].append(f"{resource['key']}: " + "; ".join(resource["limits"]["incomplete"]))
             if level < max_depth:
                 text = (resource.get("body") or "") + "\n" + "\n".join(c["body"] for c in resource["comments"])
-                forge_context = {"kind": resource["forge"], "host": resource["host"], "repo": resource["repo"], "scheme": "https",
-                                 "api_url": candidates[0]["forge"]["api_url"], "token_env": candidates[0]["forge"].get("token_env"),
-                                 "role": "primary", "source": "resource"}
+                forge_context = {**resolved_forge, "role": "primary", "source": "resource"}
                 for linked in extract_references(text, f"resource:{resource['key']}", [forge_context] + self.forges,
                                                  self.limits["max_refs_per_commit"]):
                     if linked["form"] in ("hash", "gh-prefix", "bang") and linked.get("number"):

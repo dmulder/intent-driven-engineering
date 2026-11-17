@@ -769,6 +769,8 @@ def main(argv=None):
     code = 0
     if isinstance(result, dict) and "exit_code" in result and args.trueup_command in ("run", "retry", "reanalyze"):
         code = result["exit_code"]
+    if args.trueup_command == "verify" and isinstance(result, dict) and not result.get("ok", False):
+        code = 1
     if args.json:
         emit({"text": result} if isinstance(result, str) else result, True)
     else:

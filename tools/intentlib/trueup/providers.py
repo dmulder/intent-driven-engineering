@@ -269,14 +269,18 @@ class Provider:
                 text, usage = stdout_text, None
                 if invocation.get("output") == "file":
                     try:
-                        with open(output_file, "r", encoding="utf-8", errors="replace") as stream:
-                            text = stream.read()
+                        with open(output_file, "rb") as stream:
+                            answer = stream.read(self.max_output_bytes + 1)
+                        if len(answer) > self.max_output_bytes:
+                            return ProviderResult(False, error=CONTEXT, message="provider output file exceeds max_output_bytes",
+                                                  duration=duration, invocation=index, truncated=True)
+                        text = answer.decode("utf-8", "replace")
                     except OSError:
                         text = ""
                 text, usage, envelope_error = unwrap_envelope(text)
                 if envelope_error is not None:
                     kind = classify_failure(1, "", envelope_error)
-                    return ProviderResult(False, error=kind, message=envelope_error[:500], returncode=rc, duration=duration, invocation=index)
+                    return ProviderResult(False, error=kind, message=envelope_error[:500], returncode=rc, duration=duration, invocation=index, usage=usage)
                 if not text.strip():
                     return ProviderResult(False, error=EMPTY, message="provider returned no text", returncode=rc, duration=duration, invocation=index, usage=usage)
                 return ProviderResult(True, text=text, usage=usage, duration=duration, returncode=rc, invocation=index, truncated=truncated)
@@ -502,6 +506,9 @@ class Caller:
                 return {"value": best[0].value, "provider": provider.name, "model": provider.model, "usage": best[1].usage,
                         "log": log, "problems": best[0].problems}
             return None
+        if best is not None:
+            return {"value": best[0].value, "provider": provider.name, "model": provider.model, "usage": best[1].usage,
+                    "log": log, "problems": best[0].problems}
         return None
 
 

@@ -321,7 +321,8 @@ class Engine:
                 finding["commit"] = sha_
                 finding["id"] = analysis.finding_id(sha_, finding)
                 finding["date"] = iso(committer_ts) if committer_ts else None
-                finding["subject"] = info["message"].strip().splitlines()[0][:200] if info["message"].strip() else ""
+                subject, _ = redact(info["message"])
+                finding["subject"] = subject.strip().splitlines()[0][:200] if subject.strip() else ""
                 finding["analysis"] = {"provider": result.get("provider"), "model": result.get("model"), "chunk": result["id"],
                                        "analysis_version": ANALYSIS_VERSION, "prompt_version": PROMPT_VERSION}
                 if finding["id"] in seen:
@@ -473,7 +474,7 @@ class Engine:
             return live
         if not self.ai:
             return live
-        out_of_order = item["index"] < getattr(live, "cursor", -1)
+        out_of_order = item["index"] <= getattr(live, "cursor", -1)
         graph = graph_mod.fold(self._entries(upto=item["index"])) if out_of_order else live
         entry = self._entry(item)
         findings = entry["findings"]

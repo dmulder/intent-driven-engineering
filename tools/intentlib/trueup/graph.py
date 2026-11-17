@@ -11,7 +11,7 @@ import json
 from . import ANALYSIS_VERSION
 from .analysis import extract_json, normalize_ws, render_prompt
 from .providers import Parsed
-from .util import iso, read_json, shard, sha, write_json
+from .util import iso, read_json, redact, shard, sha, write_json
 
 RELATIONS = ["continues", "refines", "supports", "supersedes", "reverses", "retires", "contradicts", "related"]
 MERGE_RELATIONS = ("continues", "refines")
@@ -215,6 +215,7 @@ def candidate_nodes(graph, findings, commit_paths, reverted_shas=(), limit=8):
 
 
 def link_items(findings, candidates, message):
+    message, _ = redact(message)
     items = [{"ref": "C0", "type": "commit-message", "source": {}, "text": message[:3000]}]
     for n, f in enumerate(findings, 1):
         items.append({"ref": f"F{n}", "type": "new-finding", "source": {}, "text": json.dumps(
@@ -241,21 +242,22 @@ def make_link_parser(items, findings, candidates):
 
     def parse(text):
         obj, kind = extract_json(text)
-        if obj is None:
-            return Parsed(None, [f"reply is {kind}"], kind)
+        if not isinstance(obj, dict):
+            return Parsed(None, [f"reply is {kind or 'not an object'}"], kind or "schema")
         if not isinstance(obj.get("links"), list):
             return Parsed(None, ["links list missing"], "schema")
         out, problems = [], []
         for index, raw in enumerate(obj["links"][:40]):
             label = f"link {index + 1}"
-            if not isinstance(raw, dict) or raw.get("finding") not in finding_by_ref or raw.get("target") not in node_by_ref \
+            if not isinstance(raw, dict) or not isinstance(raw.get("finding"), str) or not isinstance(raw.get("target"), str) \
+                    or raw.get("finding") not in finding_by_ref or raw.get("target") not in node_by_ref \
                     or raw.get("relation") not in RELATIONS:
                 problems.append(f"{label}: unknown finding/target/relation")
                 continue
             evidence, current = [], False
             for e in raw.get("evidence") if isinstance(raw.get("evidence"), list) else []:
                 ref, quote = (e.get("ref"), e.get("quote")) if isinstance(e, dict) else (None, None)
-                if ref not in by_ref or not isinstance(quote, str) or normalize_ws(quote) not in norm[ref] or len(normalize_ws(quote)) < 4:
+                if not isinstance(ref, str) or ref not in by_ref or not isinstance(quote, str) or normalize_ws(quote) not in norm[ref] or len(normalize_ws(quote)) < 4:
                     problems.append(f"{label}: evidence {str(ref)[:20]!r} invalid or quote not found")
                     continue
                 evidence.append({"ref": ref, "quote": quote.strip()[:400]})

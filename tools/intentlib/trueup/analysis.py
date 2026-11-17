@@ -217,8 +217,8 @@ def bundle_id(bundle):
 
 def split_bundle(bundle):
     """Halve a bundle after a context-window error. Returns None when it cannot get smaller."""
-    shared = [i for i in bundle if i["ref"] in ("C0", "P0")]
-    body = [i for i in bundle if i["ref"] not in ("C0", "P0")]
+    shared = [i for i in bundle if i["ref"] == "C0" or (i["ref"] == "P0" and len(i["text"]) <= 3000)]
+    body = [i for i in bundle if i not in shared]
     if len(body) >= 2:
         half = len(body) // 2
         return [shared + body[:half], shared + body[half:]]
@@ -312,7 +312,7 @@ def validate_findings(obj, items, commit_paths):
         entries = raw.get("evidence") if isinstance(raw.get("evidence"), list) else []
         for entry in entries[:12]:
             ref = entry.get("ref") if isinstance(entry, dict) else None
-            if ref not in by_ref:
+            if not isinstance(ref, str) or ref not in by_ref:
                 dropped.append(f"unknown evidence id {str(ref)[:30]!r}")
                 continue
             quote = entry.get("quote")
@@ -371,8 +371,8 @@ def validate_findings(obj, items, commit_paths):
 def make_extraction_parser(items, commit_paths):
     def parse(text):
         obj, kind = extract_json(text)
-        if obj is None:
-            return Parsed(None, [f"reply is {kind}"], kind)
+        if not isinstance(obj, dict):
+            return Parsed(None, [f"reply is {kind or 'not an object'}"], kind or "schema")
         return validate_findings(obj, items, commit_paths)
     return parse
 
@@ -412,14 +412,14 @@ def make_consolidation_parser(findings):
 
     def parse(text):
         obj, kind = extract_json(text)
-        if obj is None:
-            return Parsed(None, [f"reply is {kind}"], kind)
+        if not isinstance(obj, dict):
+            return Parsed(None, [f"reply is {kind or 'not an object'}"], kind or "schema")
         groups = obj.get("groups")
         if not isinstance(groups, list):
             return Parsed(None, ["groups missing"], "schema")
         seen, out, problems = set(), [], []
         for g in groups:
-            members = [m for m in (g.get("members") if isinstance(g, dict) and isinstance(g.get("members"), list) else []) if m in refs and m not in seen]
+            members = [m for m in (g.get("members") if isinstance(g, dict) and isinstance(g.get("members"), list) else []) if isinstance(m, str) and m in refs and m not in seen]
             if not members:
                 problems.append("group without valid unseen members dropped")
                 continue

@@ -20,7 +20,7 @@ GIT_ENV_OVERRIDES = {
     "LC_ALL": "C",
 }
 GIT_GLOBAL_ARGS = ["-c", "core.quotepath=off", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
-                   "-c", "core.hooksPath=" + os.devnull]
+                   "-c", "core.hooksPath=" + os.devnull, "-c", "log.showSignature=false"]
 HEX = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 
@@ -31,9 +31,13 @@ class GitFailure(TrueUpError):
         self.stderr = stderr
 
 
+GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+
+
 def git_env():
     env = dict(os.environ)
-    for name in ("GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_PAGER", "PAGER"):
+    for name in ("GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_PAGER", "PAGER", *GIT_LOCATION_VARS):
         env.pop(name, None)
     env.update(GIT_ENV_OVERRIDES)
     return env
@@ -71,7 +75,13 @@ class Repo:
         process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_env())
         timer = None
         try:
-            timer = threading.Timer(timeout, process.kill)
+            timed_out = threading.Event()
+
+            def expire():
+                timed_out.set()
+                process.kill()
+
+            timer = threading.Timer(timeout, expire)
             timer.start()
             data = process.stdout.read(cap + 1)
             truncated = len(data) > cap
@@ -80,6 +90,10 @@ class Repo:
                 data = data[:cap]
             else:
                 process.wait()
+            if timed_out.is_set():
+                raise GitFailure(f"git {args[0]} timed out after {timeout}s")
+            if not truncated and process.returncode != 0:
+                raise GitFailure(f"git {args[0]} failed with exit status {process.returncode}", process.returncode)
             return data, truncated
         finally:
             if timer:
@@ -276,7 +290,8 @@ def parse_trailers(message):
 
 def parse_raw_diff(data):
     """Parse `diff-tree -z --raw`. Returns a list of change dicts with exact (byte) paths."""
-    parts = data.split(b"\0")
+    # Only delimiter-terminated fields are complete, including at the byte cap.
+    parts = data.split(b"\0")[:-1]
     entries, i = [], 0
     while i < len(parts):
         head = parts[i]
@@ -290,11 +305,15 @@ def parse_raw_diff(data):
         status = fields[4]
         kind, score = status[0], (int(status[1:]) if status[1:].isdigit() else None)
         i += 1
-        first = parts[i] if i < len(parts) else b""
+        if i >= len(parts):
+            break
+        first = parts[i]
         i += 1
         second = None
         if kind in "RC":
-            second = parts[i] if i < len(parts) else b""
+            if i >= len(parts):
+                break
+            second = parts[i]
             i += 1
         new_raw = second if second is not None else first
         old_raw = first if second is not None else None
@@ -465,7 +484,7 @@ def map_paths(repo, old_rev, new_rev, timeout=120):
 
 def blame_lines(repo, revision, path, timeout=120):
     """line number -> commit for `path` at revision (None revision = working tree)."""
-    args = ["blame", "--porcelain", "-w"]
+    args = ["blame", "--no-textconv", "--porcelain", "-w"]
     if revision:
         args += [revision]
     args += ["--", path]

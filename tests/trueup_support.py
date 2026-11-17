@@ -37,7 +37,9 @@ class GitRepo:
         self.git("config", "core.autocrlf", "false")
 
     def git(self, *args, input=None, ok=True, env=None):
-        full = {**os.environ, **GIT_ENV, **(env or {})}
+        from intentlib.trueup.gitscan import GIT_LOCATION_VARS
+        full = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
+        full.update({**GIT_ENV, **(env or {})})
         result = subprocess.run(["git", *args], cwd=self.path, env=full, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if ok and result.returncode:
             raise AssertionError(f"git {args}: {result.stderr.decode()}")

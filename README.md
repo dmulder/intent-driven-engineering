@@ -178,12 +178,12 @@ Human output is indented JSON for records, and concise diagnostics for validatio
 
 ## Retrofit an existing project: true-up
 
-A repository that never recorded intent can still be queried. `intentctl trueup` reads Git history (and, if you allow it, GitHub/GitLab pull requests, issues and reviews), optionally asks an AI CLI (`claude`, `codex`, `gemini`, `opencode`, or your own command) to extract reasons, decisions, constraints and rejected alternatives, and keeps the result in a **separate, non-authoritative store** under `.git/intent-trueup/`. It does not touch the working tree, the index, history, or `.intent/`.
+A repository that never recorded intent can still be queried. `intentctl trueup` reads Git history (and, if you allow it, GitHub/GitLab pull requests, issues and reviews), optionally asks an AI CLI (`claude`, `codex`, `gemini`, `opencode`, or your own command) to extract reasons, decisions, constraints and rejected alternatives, and keeps the result in a **separate, non-authoritative store** under `.git/intent-trueup/`. Discovery does not touch the working tree, the index, history, or `.intent/`. Explicit reviewed `trueup promote` creates canonical metadata in `.intent/`.
 
 ```sh
 intentctl trueup init
 intentctl trueup estimate
-intentctl trueup run --no-ai                      # local inspection only, no model, no network
+intentctl trueup run --no-ai --network off                      # local inspection only, no model, no network
 intentctl trueup run --provider claude --acknowledge-data-sharing --max-commits 20 --network forge
 intentctl trueup status                           # coverage; a run with failures is never "complete"
 intentctl trueup retry --provider claude --acknowledge-data-sharing --network forge

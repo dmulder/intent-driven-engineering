@@ -57,6 +57,9 @@ class Store:
         except OSError as exc:
             raise FatalStateError(f"cannot create state directory {path}: {exc}") from exc
         store.acquire()
+        if cls.exists(path):
+            store.release()
+            raise TrueUpError(f"a true-up store already exists at {path}; use `trueup extend` or choose --state-dir")
         write_json(store.path / "config.json", config)
         write_json(store.path / "meta.json", {
             "format": STATE_FORMAT, "kind": "intent-trueup-store", "store_id": sha({"path": str(path), "at": iso(), "pid": os.getpid()})[:16],
@@ -193,7 +196,11 @@ class Store:
         with self._events_lock:
             try:
                 self.path.mkdir(parents=True, exist_ok=True)
-                with open(self.path / "events.jsonl", "ab") as stream:
+                with open(self.path / "events.jsonl", "a+b") as stream:
+                    if stream.tell():
+                        stream.seek(-1, os.SEEK_END)
+                        if stream.read(1) != b"\n":
+                            stream.write(b"\n")
                     stream.write(line)
                     stream.flush()
             except OSError as exc:

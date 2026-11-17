@@ -175,9 +175,18 @@ class RetriesAndRepair(ScriptCase):
         self.assertLess(time.monotonic() - started, 20)
         self.assertEqual(ctx.exception.log[0]["class"], prov.TIMEOUT)
         pid = int(pidfile.read_text())
-        time.sleep(0.3)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(pid, 0)
+                stat = Path(f"/proc/{pid}/stat")
+                if sys.platform.startswith("linux") and (not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"):
+                    break
+            except (ProcessLookupError, FileNotFoundError):
+                break
+            if time.monotonic() >= deadline:
+                self.fail(f"grandchild {pid} survived process-group termination")
+            time.sleep(0.05)
 
     def test_malformed_output_is_repaired_once_with_correction_prompt(self):
         body = f"""
