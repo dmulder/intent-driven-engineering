@@ -11,6 +11,23 @@
 - [x] Stricter unknown provenance: newly introduced after-bytes require intent coverage.
 - [x] Binding verification states separate claimed preservation from independently supported conclusions.
 
+## Repository adoption goals
+
+This project is a tool installed on a user's machine, usable across existing
+repositories, rather than a template to copy. Agents curate intents as durable
+communication to other agents and to humans reviewing why a change happened.
+
+- [x] User-local `make install` and standalone installer with no runtime dependencies.
+- [x] Deploy `INTENT.md` through a bounded, non-destructive `AGENTS.md` reference.
+- [x] Initialize existing or empty Git repositories without importing template intents.
+- [x] Expose unknown legacy coverage as an incremental adoption backlog.
+- [x] Read-only audit of committed and local changes, including skipped human accounting.
+- [x] Foreground monitoring, JSON reconciliation task packets, and Markdown rationale reports.
+- [ ] Agent adapters that consume reconciliation packets and propose evidence-backed intents.
+- [ ] Review UX for accepting, correcting, or rejecting inferred rationale and uncertainty.
+- [ ] Guided branch repair for already committed gaps without rewriting canonical records.
+- [ ] Efficient incremental monitoring across many large repositories.
+
 ## Before production adoption
 
 1. Benchmark large histories, repetitive files, and many bindings. Add a bounded byte-diff strategy and incremental object/record reads. Cache interval and graph indexes only as reproducible derived data.

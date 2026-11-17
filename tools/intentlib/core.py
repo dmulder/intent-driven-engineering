@@ -529,8 +529,10 @@ class Store:
                     self.error("SNAPSHOT", event["id"], str(exc))
 
 
-def validate(entries, base_entries=None):
-    store = Store(entries)
+def validate(entries, base_entries=None, *, enforce_schema_definitions=True):
+    # Historical audits can separately report old schema pins. Record validation
+    # still uses this engine's trusted SCHEMAS, never repository-supplied schemas.
+    store = Store(entries, enforce_schema_definitions=enforce_schema_definitions)
     base_entries = base_entries or {}
     base_exists = ".intent/config.json" in base_entries
     # Base history may predate the running validator's published schemas; enforce

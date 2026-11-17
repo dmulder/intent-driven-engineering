@@ -3,6 +3,8 @@ import argparse
 import copy
 import os
 import re
+import shlex
+import time
 from pathlib import Path
 import sys
 
@@ -16,7 +18,7 @@ from .schema import ACTIONS, SCHEMAS, check, published
 def output(value, as_json=False):
     if as_json:
         print(canonical(value).decode())
-    elif isinstance(value, dict) and "errors" in value:
+    elif isinstance(value, dict) and "errors" in value and "valid" in value:
         print("valid" if value["valid"] else "invalid")
         for error in value["errors"]:
             print(f"{error['code']} {error['path']}: {error['message']}")
@@ -63,6 +65,11 @@ def install_hooks(root, uninstall=False):
     directory = Path(raw) if Path(raw).is_absolute() else root / raw
     directory.mkdir(parents=True, exist_ok=True)
     marker = "# intentctl managed dispatcher v1"
+    engine = str(Path(__file__).resolve().parents[1] / "intentctl.py")
+    runner = shlex.join([sys.executable, engine])
+    missing = shlex.quote(f'intentctl is unavailable at {engine} (Python: {sys.executable}); reinstall at the same prefix, then run intentctl uninstall-hooks in this repository if removing it.')
+    availability = (f'if [ ! -x {shlex.quote(sys.executable)} ] || [ ! -r {shlex.quote(engine)} ]; then\n'
+                    f'  printf "%s\\n" {missing} >&2\n  exit 1\nfi\n')
     for name in ("pre-commit", "pre-push"):
         path = directory / name
         backup = directory / (name + ".intentctl-original")
@@ -75,25 +82,25 @@ def install_hooks(root, uninstall=False):
                 if backup.exists():
                     backup.rename(path)
             continue
-        if managed:
-            continue
-        if backup.exists():
-            raise IntentError(f"ambiguous hook backup {backup}; reconcile manually")
-        if path.exists():
-            path.rename(backup)
+        if not managed:
+            if backup.exists():
+                raise IntentError(f"ambiguous hook backup {backup}; reconcile manually")
+            if path.exists():
+                path.rename(backup)
         # Resolve repository at execution time, including linked worktrees.
         # The original hook runs first and receives the same arguments/stdin.
         if name == "pre-commit":
-            body = 'python3 "$root/tools/intentctl.py" validate --staged\n'
+            body = runner + " validate --staged\n"
             chain = 'if [ -x "$original" ]; then "$original" "$@" || exit $?; fi\n'
         else:
             # Preserve stdin for the original pre-push hook and our validator.
-            body = 'python3 "$root/tools/intentctl.py" validate --push < "$input"\n'
+            body = runner + ' validate --push < "$input"\n'
             chain = ('input=$(mktemp) || exit 1\ntrap \'rm -f "$input"\' EXIT HUP INT TERM\ncat > "$input"\n'
                      'if [ -x "$original" ]; then "$original" "$@" < "$input" || exit $?; fi\n')
         text = ('#!/bin/sh\n' + marker + '\nroot=$(git rev-parse --show-toplevel) || exit 1\n'
-                'original="$0.intentctl-original"\n' + chain + body)
-        path.write_text(text)
+                'original="$0.intentctl-original"\n' + chain + availability + body)
+        if not path.exists() or path.read_text(errors="replace") != text:
+            path.write_text(text)
         path.chmod(0o755)
 
 
@@ -343,7 +350,7 @@ def finalize(root, args):
     return {"event": event["id"], "records": event["records"], "next": "stage .intent and run validate --staged"}
 
 
-def validate_commit(root, commit):
+def validate_commit(root, commit, *, enforce_schema_definitions=True):
     parents = git(root, "rev-list", "--parents", "-n", "1", commit).decode().split()[1:]
     after = snapshot(root, revision=commit)
     if ".intent/config.json" not in after:
@@ -353,7 +360,7 @@ def validate_commit(root, commit):
     if len(parents) > 1:
         return [{"code": "MERGE_UNSUPPORTED", "path": commit, "message": "merge commits are unsupported; rebase or squash and reconcile metadata explicitly"}]
     before = snapshot(root, revision=parents[0]) if parents else {}
-    return validate(after, before)
+    return validate(after, before, enforce_schema_definitions=enforce_schema_definitions)
 
 
 def run_validation(root, args):
@@ -515,6 +522,16 @@ def parser():
         return cmd
     init = command("init")
     init.add_argument("--no-hooks", action="store_true")
+    init.add_argument("--no-instructions", action="store_true", help="initialize metadata without deploying instruction files")
+    d = command("deploy")
+    d.add_argument("--update", action="store_true", help="replace an intentctl-managed INTENT.md")
+    for name in ("audit", "reconcile", "watch"):
+        c = command(name)
+        c.add_argument("--since", help="audit commits after this ancestor instead of all history")
+        if name == "watch":
+            c.add_argument("--interval", type=float, default=5)
+            c.add_argument("--once", action="store_true")
+    command("report")
     command("uninstall-hooks")
     command("baseline")
     v = command("validate")
@@ -588,7 +605,51 @@ def main(argv=None):
     try:
         root = root_path()
         if args.command == "init":
+            from .adoption import deployment_plan, deploy
+            if not args.no_instructions:
+                deployment_plan(root)  # Check conflicts before creating metadata or hooks.
             result = initialize(root, args.no_hooks)
+            if not args.no_instructions:
+                result["instructions"] = deploy(root)
+        elif args.command == "deploy":
+            from .adoption import deploy
+            result = deploy(root, args.update)
+        elif args.command in ("audit", "reconcile", "watch"):
+            from .adoption import audit, reconciliation
+            if args.command == "watch":
+                import math
+                if not math.isfinite(args.interval) or args.interval <= 0:
+                    raise IntentError("--interval must be a positive finite number")
+                previous = None
+                cache = {}
+                try:
+                    while True:
+                        try:
+                            result = audit(root, args.since, cache=cache)
+                        except ValidationError as exc:
+                            result = {"needs_attention": True, "valid": False, "errors": exc.errors}
+                        except (IntentError, OSError, KeyError, IndexError) as exc:
+                            result = {"needs_attention": True, "valid": False, "errors": [
+                                {"code": "OPERATION", "path": ".intent", "message": str(exc)}]}
+                        fingerprint = canonical(result)
+                        if fingerprint != previous:
+                            output(result, args.json)
+                            sys.stdout.flush()
+                            previous = fingerprint
+                        if args.once:
+                            return int(result["needs_attention"])
+                        time.sleep(args.interval)
+                except KeyboardInterrupt:
+                    return 0
+            result = reconciliation(root, args.since) if args.command == "reconcile" else audit(root, args.since)
+            output(result, args.json)
+            return int(result.get("audit", result)["needs_attention"])
+        elif args.command == "report":
+            from .adoption import report, review_state
+            if not args.json:
+                print(report(root), end="")
+                return 0
+            result = review_state(root)
         elif args.command == "uninstall-hooks":
             install_hooks(root, uninstall=True)
             result = {"hooks": "uninstalled; original hooks restored"}
