@@ -117,7 +117,7 @@ intentctl capture --key valid-tokens \
 intentctl intent-create --event valid-tokens --key valid-tokens \
   --title 'Token validity' --description 'Reject invalid tokens' \
   --rationale 'Invalid credentials must not grant access' \
-  --requirement 'Accept only valid tokens'
+  --requirement 'Accept only valid tokens' --severity must
 intentctl bind --event valid-tokens --key token-condition \
   --intent I-ID --path auth.py --start 34 --end 45 \
   --rationale 'This expression checks token validity'
@@ -128,6 +128,8 @@ git add .intent
 intentctl validate --staged
 git commit -m 'Introduce token validity intent'
 ```
+
+`--severity` (`must`, `should`, `prefer`) is optional and defaults to `must`. It tells agents how strongly an intent binds; it never removes the need to declare a transition for every affected binding. See [writing intent](docs/intent-authoring.md).
 
 Ranges are half-open UTF-8 **byte offsets**, not character positions. Omitting `--start` and `--end` binds the whole file. Bind another intent to the same bytes to represent overlap. Bind the same intent to another region using another binding key.
 
@@ -157,12 +159,16 @@ Capture generates `.intent/drafts/E-….json` and a list of required declaration
 
 Bindings that do not overlap a changed interval are not required to rebind. Their pins may remain on older snapshots when deterministic equal-region mapping uniquely preserves their bytes (coordinate maintenance, not semantic inference). Ambiguous moves still need an explicit `rebind`. Use `--verification-status` on bind/rebind to separate claimed preservation from independently supported verification.
 
-For an intent-only change, capture with no staged source edits, use `intent-revise I-ID --event KEY --requirement TEXT`, and declare `modify`. Old bindings remain pinned to their exact revision and appear in `status`/`impact` as needing reassessment. Use `rebind --intent-revision N` in a later event to acknowledge the new policy.
+For an intent-only change, capture with no staged source edits, use `intentctl intent-revise I-ID --event KEY --requirement TEXT`, and declare `modify`. Old bindings remain pinned to their exact revision and appear in `status`/`impact` as needing reassessment. Use `rebind --intent-revision N` in a later event to acknowledge the new policy.
 
 ## Query and diagnose
 
 ```sh
 intentctl status --json
+intentctl status --strict
+intentctl context auth.py --json
+intentctl coverage --json
+intentctl list-intents --contains token --json
 intentctl explain auth.py:2 --json
 intentctl explain auth.py:2 --at HEAD~1 --json
 intentctl history auth.py:2 --json
@@ -173,6 +179,10 @@ intentctl doctor --json
 intentctl validate --commit HEAD
 intentctl validate --range BASE..HEAD
 ```
+
+`context PATH...` answers "what governs this file or directory?" in one read-only call: every active intent with requirements, rationale, severity, verification, and live line range, ordered `must` first; one-hop related intents bound elsewhere; and the regions no intent covers (unknown provenance). `coverage` summarizes governed bytes per file and lists files with no intent. `list-intents` shows active intent by default; `--status all` includes retired and superseded intent, which is evidence rather than a current constraint. `status` and `doctor` report decay signals under `attention`: bindings awaiting reassessment, intents that govern no code, unresolved bindings, and failed verification. `status --strict` exits nonzero when any exist. All of this is recomputed from the repository; nothing is cached or copied into instruction files.
+
+Every JSON command result carries `output_version` (currently 1) and only gains fields within a version. Canonical records carry `schema_version` instead. Mutating commands hold a per-worktree lock (`intentctl.lock` in the worktree's Git directory, POSIX `fcntl`) and fail fast when another writer is active; read-only commands never lock.
 
 Human output is indented JSON for records, and concise diagnostics for validation. JSON validation returns `valid`, `errors`, stable codes, paths, and messages; failure exits nonzero. `doctor` diagnoses without modifying history. Repair drafts or append corrective records; never overwrite committed revisions.
 
@@ -201,6 +211,9 @@ Runs are resumable and isolate failures per commit. Discoveries are inferred, la
 - [Security and trust](docs/security.md)
 - [True-up: retrospective intent discovery](docs/trueup.md)
 - [Reproducible demonstration](docs/demonstration.md)
+- [Lessons from Telos](docs/telos-lessons.md)
+- [Writing intent that agents can use](docs/intent-authoring.md)
+- [Evaluating whether intent helps agents](docs/evaluation.md)
 - [Roadmap](docs/roadmap.md)
 - [Agent entry point](AGENTS.md) and [mandatory intent protocol](INTENT.md)
 

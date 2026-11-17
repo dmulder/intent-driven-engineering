@@ -176,7 +176,7 @@ class AdoptionTests(RepoTest):
         self.assertEqual(index_before, (self.root / '.git/index').read_bytes())
         self.assertEqual(metadata_before, {str(p): p.read_bytes() for p in (self.root / '.intent').rglob('*.json')})
         once = self.ctl('watch', '--once', '--since', checkpoint, ok=False)
-        self.assertEqual(result['audit'], once)
+        self.assertEqual({'output_version': 1, **result['audit']}, once)
         self.assertIn('positive finite', str(self.ctl('watch', '--once', '--interval', 'nan', ok=False)))
 
     def test_report_resolves_live_coordinates_without_rewriting_pins(self):

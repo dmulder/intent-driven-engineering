@@ -1,6 +1,8 @@
 """Canonical storage, exact Git snapshots, and structural transition validation."""
 import base64
+from contextlib import contextmanager
 import difflib
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -95,6 +97,30 @@ def root_path():
     return Path(os.fsdecode(git(Path.cwd(), "rev-parse", "--show-toplevel")[:-1]))
 
 
+@contextmanager
+def writer_lock(root):
+    """Serialize metadata writers per worktree; fail fast instead of losing a draft or manifest update."""
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise IntentError("metadata writers need POSIX file locking (fcntl); unsupported on this platform") from exc
+    raw = git(root, "rev-parse", "--git-path", "intentctl.lock").decode().strip()
+    path = Path(raw) if Path(raw).is_absolute() else root / raw
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise IntentError(f"cannot open writer lock {path}: {exc.strerror}") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise IntentError(f"another intentctl writer holds {path}; wait for it to finish, then retry") from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def head(root):
     value = git(root, "rev-parse", "--verify", "HEAD", ok=(0, 128)).decode().strip()
     return value or None
@@ -187,6 +213,12 @@ def put_object(root, data):
     return record["id"]
 
 
+@lru_cache(maxsize=None)
+def opcodes(a, b):
+    """SequenceMatcher is quadratic on bytes and many bindings share one file diff: compute each pair once."""
+    return tuple(difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes())
+
+
 def intervals(before, after):
     a = before[1] if before else b""
     b = after[1] if after else b""
@@ -195,7 +227,7 @@ def intervals(before, after):
         return [{"before": [0, len(a)], "after": [0, len(b)]}]
     # SequenceMatcher is deterministic; textual matching does not establish identity.
     return [{"before": [i, j], "after": [k, l]}
-            for tag, i, j, k, l in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+            for tag, i, j, k, l in opcodes(a, b)
             if tag != "equal"]
 
 
@@ -231,7 +263,7 @@ def map_preserved_range(start, end, before, after):
         return (start, end)
     mapped = []
     cursor = start
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in opcodes(a, b):
         if cursor >= end and not (start == end and cursor == start):
             break
         if tag != "equal":
