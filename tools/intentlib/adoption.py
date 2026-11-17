@@ -209,6 +209,10 @@ def report(root):
     for intent in sorted(state['intents'], key=lambda i: i['id']):
         lines += [f"## {intent['title']}", '', f"{intent['id']} revision {intent['revision']} ({intent['status']})", '',
                   intent['description'], '', 'Reason: ' + intent['rationale'], '']
+        if intent.get('reconstruction'):
+            r = intent['reconstruction']
+            lines += [f"Reconstructed history; verification {r['verification']}; basis {r['basis']}; uncertainty {r['uncertainty']}.",
+                      'Source commits: ' + ', '.join(r['source_commits']), '']
         lines += ['- ' + requirement for requirement in intent['requirements']]
         lines += ['']
         for binding in state['bindings']:

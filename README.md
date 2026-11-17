@@ -188,19 +188,29 @@ Human output is indented JSON for records, and concise diagnostics for validatio
 
 ## Retrofit an existing project: true-up
 
-A repository that never recorded intent can still be queried. `intentctl trueup` reads Git history (and, if you allow it, GitHub/GitLab pull requests, issues and reviews), optionally asks an AI CLI (`claude`, `codex`, `gemini`, `opencode`, or your own command) to extract reasons, decisions, constraints and rejected alternatives, and keeps the result in a **separate, non-authoritative store** under `.git/intent-trueup/`. Discovery does not touch the working tree, the index, history, or `.intent/`. Explicit reviewed `trueup promote` creates canonical metadata in `.intent/`.
+`intentctl trueup` reconstructs project history directly into **actual `.intent`
+records**: intents and revisions, historical bindings, source snapshots and import
+events. Agents use the normal `explain`, `history`, `show-intent` and `report`
+commands. Evidence, source commits, inference basis and uncertainty are retained;
+verification stays pending. There is no separate results store or promotion gate.
 
 ```sh
 intentctl trueup init
 intentctl trueup estimate
-intentctl trueup run --no-ai --network off                      # local inspection only, no model, no network
-intentctl trueup run --provider claude --acknowledge-data-sharing --max-commits 20 --network forge
-intentctl trueup status                           # coverage; a run with failures is never "complete"
-intentctl trueup retry --provider claude --acknowledge-data-sharing --network forge
-intentctl trueup query src/auth.py:42             # also shown by `explain`/`history` as a separate section
+intentctl trueup run --provider claude --acknowledge-data-sharing --max-commits 20
+intentctl trueup run --provider claude --acknowledge-data-sharing
+intentctl explain src/auth.py:42 --json
+intentctl history src/auth.py:42 --json
+intentctl validate
+git add .intent && intentctl validate --staged
 ```
 
-Runs are resumable and isolate failures per commit. Discoveries are inferred, labelled as such, and become canonical intent only through an explicit `trueup review` and `trueup promote`, which reuse the normal capture/finalize/validate flow and record verification as `pending`. Read [docs/trueup.md](docs/trueup.md) for privacy, cost, configuration and limitations before pointing it at a model.
+Runs are resumable and import useful results even when other commits fail.
+Processing checkpoints live in ignored `.intent/cache/trueup/`; deleting that cache
+or cloning the repository preserves the imported intent data. `run --dry-run`
+previews analysis; `run --no-ai --network off` only inspects locally. Import changes
+metadata without rewriting source, the index or Git history. Read
+[docs/trueup.md](docs/trueup.md) for evidence, privacy, cost and applicability limits.
 
 ## Design and status
 

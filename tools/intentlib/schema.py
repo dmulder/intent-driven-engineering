@@ -26,7 +26,7 @@ POINT = arr(N)
 INTERVAL = obj({"before": POINT, "after": POINT})
 TARGET = obj({"path": TEXT, "start": N, "end": N, "source": HASH,
               "mode": REF["properties"]["mode"]})
-ACTIONS = ["preserve", "modify", "supersede", "retire", "unapply", "rebind", "introduce"]
+ACTIONS = ["preserve", "modify", "supersede", "retire", "unapply", "rebind", "introduce", "import"]
 VERIFICATION_STATUS = {"type": "string", "enum": ["declared", "pending", "verified", "failed", "unverifiable"]}
 VERIFICATION = obj({"status": VERIFICATION_STATUS, "method": TEXT, "evidence": TEXT}, required=["status"])
 TRANSITION = obj({"intent_id": ID, "binding_id": {"type": ["string", "null"]},
@@ -37,12 +37,22 @@ COMMON = {"schema_version": VERSION, "id": ID, "revision": REV,
           "previous_hash": NULLS, "created_by_event": ID, "content_hash": HASH}
 BINDING_REQUIRED = list(COMMON) + ["intent_id", "intent_revision", "relationship", "status",
                                    "target", "rationale", "predecessors"]
+RECONSTRUCTION = obj({
+    "method": {"type": "string", "enum": ["git-history-ai"]},
+    "node_id": TEXT, "content_hash": HASH, "source_commits": arr(TEXT),
+    "basis": {"type": "string", "enum": ["explicit", "inferred", "mixed"]},
+    "uncertainty": {"type": "string", "enum": ["low", "medium", "high"]},
+    "verification": {"type": "string", "enum": ["pending"]},
+    "history": {"type": "object", "additionalProperties": True},
+    "limitations": arr(TEXT),
+})
 INTENT_PROPERTIES = {**COMMON, "status": {"type": "string", "enum": ["active", "retired", "superseded"]},
     "kind": TEXT, "title": TEXT, "description": TEXT, "rationale": TEXT,
     "requirements": arr(TEXT), "constraints": arr(TEXT), "related_intents": arr(ID),
+    "reconstruction": RECONSTRUCTION,
     "severity": {"type": "string", "enum": ["must", "should", "prefer"]}}
 SCHEMAS = {
-    "intent": obj(INTENT_PROPERTIES, required=[k for k in INTENT_PROPERTIES if k != "severity"]),
+    "intent": obj(INTENT_PROPERTIES, required=[k for k in INTENT_PROPERTIES if k not in ("severity", "reconstruction")]),
     "binding": obj({**COMMON, "intent_id": ID, "intent_revision": REV,
         "relationship": {"type": "string", "enum": ["implements", "constrained-by", "motivated-by", "preserves", "verifies", "historically-derived-from"]},
         "status": {"type": "string", "enum": ["active", "ended", "unresolved", "historical"]},

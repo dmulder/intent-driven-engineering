@@ -324,6 +324,7 @@ class GitLabEvidence(TrueUpTest):
 
 
 class ForgeThroughCli(TrueUpTest):
+    import_results = True
     def test_evidence_reaches_the_model_and_failures_do_not_block_later_commits(self):
         mock = MockForge()
         self.addCleanup(mock.close)
@@ -352,9 +353,9 @@ class ForgeThroughCli(TrueUpTest):
         failures = self.tuj("failures")
         self.assertEqual([i["stage"] for i in failures["items"]], ["external"])
         # Cited forge evidence is linked back from the discovery
-        node = self.tuj("list")["discoveries"][0]
+        node = self.tuj("list")["intents"][0]
         shown = self.tuj("show", node["id"], "--detail")
-        self.assertTrue(shown["findings"])
+        self.assertTrue(shown["reconstruction"]["history"]["findings_data"])
         self.assertIn(last, [c["sha"] if isinstance(c, dict) else c for c in [last]])
 
     def test_offline_run_never_touches_the_network_even_with_forge_configured(self):

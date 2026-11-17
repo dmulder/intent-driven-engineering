@@ -425,6 +425,16 @@ def line_range(data, line):
     return starts[line - 1], starts[line] if line < len(starts) else len(data)
 
 
+def historical_coverage(store):
+    for event_id in reversed(store.manifest["events"]):
+        event = store.events[event_id]
+        if event["kind"] == "retrospective-import":
+            for entry in event["verification"]:
+                if entry["kind"] == "trueup-import-state":
+                    return loads(entry["result"].encode())
+    return None
+
+
 def query(root, args):
     entries = snapshot(root, revision=args.at) if getattr(args, "at", None) else snapshot(root, working=True)
     store = Store(entries, enforce_schema_definitions=not bool(args.at))
@@ -474,12 +484,16 @@ def query(root, args):
     for b in bindings.values():
         live = live_target(b, source_map, store.objects) if b["status"] in ("active", "unresolved") else None
         coords = live if live is not None else b["target"]
-        if coords["path"] == path and touches(start, end, coords["start"], coords["end"]):
+        historical_path = b["status"] == "historical" and bool(intents[b["intent_id"]].get("reconstruction"))
+        if coords["path"] == path and (historical_path or touches(start, end, coords["start"], coords["end"])):
             selected.append((b, live))
     if args.command == "explain":
-        result = []
+        result, historical = [], []
         for b, live in selected:
             if b["status"] not in ("active", "unresolved"):
+                historical.append({"association": "historical path; byte coordinates refer to the pinned source snapshot", "binding": b, "intent": store.intents[(b["intent_id"], b["intent_revision"])],
+                                   "current_intent": intents[b["intent_id"]], "verification": verification_of(b),
+                                   "origin_event": store.events[b["created_by_event"]]})
                 continue
             governed = store.intents[(b["intent_id"], b["intent_revision"])]
             result.append({"binding": b, "intent": governed,
@@ -490,8 +504,14 @@ def query(root, args):
                                             "mode": live["mode"]} if live else None),
                            "verification": verification_of(b),
                            "origin_event": store.events[b["created_by_event"]]})
-        return {"path": path, "line": line, "applicable": result,
-                "provenance": "known where bound; unbound regions have unknown provenance; new bytes require intent"}
+        answer = {"path": path, "line": line, "applicable": result,
+                  "provenance": "known where bound; unbound regions have unknown provenance; new bytes require intent"}
+        if historical:
+            answer["historical"] = historical
+        coverage = historical_coverage(store)
+        if coverage is not None:
+            answer["history_coverage"] = coverage
+        return answer
     # Explicit lineage plus spatial matches in each historical snapshot. Never infer moves.
     selected_ids = {b["id"] for b, _ in selected}
     for b in store.bindings.values():
@@ -515,17 +535,21 @@ def query(root, args):
     events = [store.events[i] for i in store.manifest["events"]
               if any(t["intent_id"] in selected_intents or t["binding_id"] in selected_ids for t in store.events[i]["intent_transitions"])
               or any(c["path"] == path for c in store.events[i]["changes"])]
-    return {"path": path, "line": line, "events": events,
+    answer = {"path": path, "line": line, "events": events,
             "intent_revisions": [v for (i, r), v in sorted(store.intents.items()) if i in selected_intents],
             "binding_revisions": [v for (i, r), v in sorted(store.bindings.items()) if i in selected_ids],
             "current_bindings": [bindings[i] for i in sorted(selected_ids) if i in bindings],
             "baseline_provenance": "unknown",
             "selection": "explicit binding lineage, live coordinate continuity, and spatial matches at each historical snapshot; line numbers alone do not establish identity"}
+    coverage = historical_coverage(store)
+    if coverage is not None:
+        answer["history_coverage"] = coverage
+    return answer
 
 
 def parser():
     p = argparse.ArgumentParser(description="Intent-native Git overlay (Python standard library). "
-                                "Optional: `intentctl trueup --help` retrofits non-authoritative retrospective intent from Git history.")
+                                "`intentctl trueup --help` imports reconstructed Git history into .intent.")
     sub = p.add_subparsers(dest="command", required=True)
     def command(name):
         cmd = sub.add_parser(name)
@@ -558,9 +582,6 @@ def parser():
         q.add_argument("--at", help="query committed snapshot REV instead of working tree")
         if name in ("explain", "history"):
             q.add_argument("location")
-            q.add_argument("--trueup-state", help="true-up state directory (default: <git-common-dir>/intent-trueup, or $INTENTCTL_TRUEUP_STATE_DIR)")
-            q.add_argument("--no-retrospective", action="store_true",
-                           help="omit the optional non-authoritative `intentctl trueup` section even if a true-up store exists")
         elif name == "context":
             q.add_argument("paths", nargs="+", metavar="PATH", help="governed file or directory (use . for all)")
         elif name == "coverage":
@@ -628,26 +649,6 @@ def parser():
     c.add_argument("--provenance", choices=["known", "unknown"])
     return p
 
-
-def retrospective(root, args, result):
-    """Attach labeled non-authoritative true-up discoveries to explain/history output when a store exists.
-
-    Optional and failure-isolated: the canonical answer is never changed or blocked by this section."""
-    if getattr(args, "no_retrospective", False) or not isinstance(result, dict):
-        return result
-    try:
-        from .trueup import query as trueup_query
-        from .trueup.gitscan import Repo
-        repo = Repo(root)
-        store = trueup_query.open_store(repo, getattr(args, "trueup_state", None), must_exist=False)
-        if store is None:
-            return result
-        path, line = location(args.location)
-        result["retrospective"] = trueup_query.retrospective_section(repo, store, path, line, getattr(args, "at", None))
-    except Exception as exc:  # noqa: BLE001 - the canonical query must still succeed
-        result["retrospective"] = {"available": False, "authority": "non-authoritative",
-                                   "error": f"true-up lookup failed and was skipped: {type(exc).__name__}: {str(exc)[:200]}"}
-    return result
 
 
 MUTATING = frozenset(("init", "deploy", "uninstall-hooks", "baseline", "capture", "intent-create", "intent-revise",
@@ -731,8 +732,6 @@ def main(argv=None):
                 result = run_validation(root, args)
             else:
                 result = query(root, args)
-                if args.command in ("explain", "history"):
-                    result = retrospective(root, args, result)
         output(result, args.json)
         if args.command == "status" and args.strict and result["attention"]:
             return 1

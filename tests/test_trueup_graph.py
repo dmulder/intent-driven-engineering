@@ -78,6 +78,7 @@ class ModelOutputValidation(unittest.TestCase):
 
 
 class GraphSemantics(TrueUpTest):
+    import_results = True
     def run_history(self):
         self.init(providers={"fake": provider_spec()})
         return self.tuj("run", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0")
@@ -147,68 +148,49 @@ class GraphSemantics(TrueUpTest):
         self.run_history()
         node = list(self.graph().nodes.values())[0]
         shown = self.tuj("show", node["id"], "--detail")
-        finding = shown["findings"][0]
+        finding = shown["reconstruction"]["history"]["findings_data"][0]
         self.assertEqual(finding["basis"], "explicit")
-        self.assertIn("direct statement", finding["claim_type"])
-        self.assertEqual(shown["authority"], "non-authoritative")
-        self.assertTrue(finding["evidence"][0]["link"].startswith("git:commit/"))
+        self.assertEqual(shown["reconstruction"]["basis"], "explicit")
+        self.assertEqual(shown["reconstruction"]["verification"], "pending")
+        self.assertTrue(finding["evidence"][0]["source"]["commit"])
         self.assertTrue(finding["evidence"][0]["quote"])
         self.assertNotIn("confidence", json.dumps(shown))
 
     def test_historical_lifecycle_is_separate_from_present_applicability(self):
-        c1, c2, c3, c4 = self.small_history()
+        self.small_history()
         self.run_history()
-        node = self.nodes_by_title()["Add auth check"]
-        shown = self.tuj("show", node["id"])
-        self.assertEqual(shown["historical_lifecycle"], "reversed")
-        self.assertEqual(shown["present_applicability"]["status"], "ended-in-history")
-        self.assertFalse(shown["present_applicability"]["verified"])
-        live = self.nodes_by_title()["Add b module"]
-        self.assertEqual(self.tuj("show", live["id"])["present_applicability"]["status"], "candidate-paths-unchanged")
-        self.repo.commit("rewrite b", {"b.py": "x = 2\n"})
-        self.assertEqual(self.tuj("show", live["id"])["present_applicability"]["status"], "candidate-needs-reassessment")
-        self.repo.commit("remove b", delete=("b.py",))
-        self.assertEqual(self.tuj("show", live["id"])["present_applicability"]["status"], "path-absent")
+        shown = self.tuj("show", self.nodes_by_title()["Add auth check"]["id"])
+        self.assertEqual(shown["status"], "retired")
+        self.assertEqual(shown["reconstruction"]["history"]["lifecycle"], "reversed")
+        self.assertEqual(self.tuj("query", "auth.py:2")["applicable"], [])
 
-    def test_rename_is_followed_as_a_proposal_only(self):
-        r = self.repo
-        r.commit("Add widget module", {"widget.py": "line one\nline two\nline three\nline four\n"})
+    def test_historical_source_pin_survives_rename_without_inventing_identity(self):
+        self.repo.commit("Add widget", {"widget.py": "one\ntwo\n"})
         self.run_history()
-        r.git("mv", "widget.py", "gadget.py")
-        r.commit("rename widget to gadget")
-        node = list(self.graph().nodes.values())[0]
-        shown = self.tuj("show", node["id"])
-        mapping = shown["present_applicability"]["path_mappings"][0]
-        self.assertIn("proposed", mapping["state"])
-        self.assertEqual(mapping["to"], "gadget.py")
-        section = self.tuj("query", "gadget.py:1")
-        self.assertEqual(len(section["discoveries"]), 1, "history is followed across the rename")
-        self.assertTrue(section["discoveries"][0]["association"])
+        self.repo.git("mv", "widget.py", "gadget.py")
+        self.repo.commit("rename widget")
+        shown = self.tuj("show", next(iter(self.graph().nodes)))
+        self.assertIn("widget.py", shown["reconstruction"]["history"]["paths"])
+        self.assertEqual(self.tuj("query", "gadget.py:1")["applicable"], [])
 
-    def test_query_by_location_filters_to_relevant_decisions_and_labels_everything(self):
-        c1, c2, c3, c4 = self.small_history()
+    def test_query_uses_canonical_historical_context(self):
+        self.small_history()
         self.run_history()
         section = self.tuj("query", "auth.py:2")
-        titles = {d["title"] for d in section["discoveries"]}
+        titles = {d["current_intent"]["title"] for d in section["historical"]}
         self.assertEqual(titles, {"Add auth check", "Revert constant-time comparison"})
-        self.assertEqual(section["authority"], "non-authoritative")
-        self.assertIn("NON-AUTHORITATIVE", section["label"])
-        self.assertTrue(section["guidance"])
-        self.assertEqual(self.tuj("query", "b.py:1")["discoveries"][0]["title"], "Add b module")
-        self.assertEqual(self.tuj("query", "unrelated.py:1")["discoveries"], [])
-        text = self.tu("query", "auth.py:2")[1]
-        self.assertIn("present applicability (unverified)", text)
-        self.assertIn("ended by: reverses", text)
+        self.assertEqual(section["applicable"], [])
+        self.assertNotIn("retrospective", section)
+        self.assertEqual(self.tuj("query", "b.py:1")["historical"][0]["intent"]["title"], "Add b module")
 
-    def test_query_reports_incomplete_coverage_so_absence_is_not_evidence(self):
+    def test_query_records_incomplete_coverage_in_canonical_events(self):
         self.repo.commit("Good [ai-nothing]", {"a.py": "1\n"})
         self.repo.commit("Bad [ai-fail]", {"b.py": "1\n"})
         self.init(providers={"fake": provider_spec()})
-        self.tuj("run", "--provider", "fake", "--acknowledge-data-sharing", "--backoff-base", "0", ok=4)
+        self.run_ai(ok=4)
         section = self.tuj("query", "b.py:1")
-        self.assertEqual(section["discoveries"], [])
-        self.assertFalse(section["coverage"]["complete"])
-        self.assertTrue(any("incomplete" in l for l in section["limitations"]))
+        self.assertEqual(section["applicable"], [])
+        self.assertFalse(section["history_coverage"]["complete"])
 
     def test_listing_filters(self):
         c1, c2, c3, c4 = self.small_history()
@@ -221,6 +203,7 @@ class GraphSemantics(TrueUpTest):
 
 
 class UntrustedInput(TrueUpTest):
+    import_results = True
     def test_instructions_in_history_are_data_inside_nonce_delimited_blocks(self):
         import os
         dump = self.tmp / "prompts"

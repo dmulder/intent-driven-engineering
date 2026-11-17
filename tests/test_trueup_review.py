@@ -12,7 +12,7 @@ from unittest import mock
 from trueup_support import GitRepo, MockForge, TrueUpTest, provider_spec
 from test_trueup_providers import ScriptCase
 import test_trueup_graph as graph_tests
-from intentlib.trueup import analysis, forge, gitscan, graph, promote, providers
+from intentlib.trueup import analysis, forge, gitscan, graph, providers
 from intentlib.trueup.store import Store
 from intentlib.trueup.util import TrueUpError
 
@@ -49,11 +49,6 @@ class ReplyValidation(unittest.TestCase):
         evidence = graph.link_items([], [], "password=hunter22")
         self.assertNotIn("hunter22", graph.link_prompt(evidence))
         self.assertNotIn("hunter22", repr(evidence))
-
-    def test_explicit_line_range_must_end_inside_file(self):
-        with self.assertRaises(TrueUpError):
-            promote.byte_range(b"one\ntwo", (1, 999))
-        self.assertEqual(promote.byte_range(b"one\ntwo", (1, 2)), (0, 7))
 
     def test_raw_diff_requires_all_path_delimiters(self):
         head = b":100644 100644 " + b"a" * 40 + b" " + b"b" * 40
@@ -220,64 +215,6 @@ class PipelineRecovery(TrueUpTest):
         store = self.store()
         self.assertNotIn("hunter22", repr(store.get_nested("attempts", sha, "000001")))
         self.assertNotIn("hunter22", repr(self.graph().nodes))
-
-
-class PromotionRecovery(TrueUpTest):
-    def setUp(self):
-        super().setUp()
-        self.repo.commit("Add module", {"x.py": "x=1\n"})
-        self.init(providers={"fake": provider_spec()})
-        self.run_ai()
-        self.node = next(iter(self.graph().nodes.values()))
-        self.tuj("review", self.node["id"], "--decision", "approve", "--reviewer", "maintainer")
-        self.digest = self.tuj("show", self.node["id"])["review"]["node_hash"]
-        from intentlib import cli
-        cli.initialize(self.repo.path, no_hooks=True)
-        self.repo.git("add", ".intent")
-        self.repo.git("commit", "-qm", "adopt")
-
-    def args(self, *extra):
-        return ["promote", self.node["id"], "--confirm", self.digest, "--key", "review", *extra]
-
-    def test_invalid_targets_relationships_and_ranges_do_not_create_events_or_drafts(self):
-        from intentlib import cli
-        original = cli.manifest(self.repo.path)
-        for extra in [("--bind", ".intent/config.json"), ("--bind", "x.py:1-999"),
-                      ("--bind", "x.py", "--relationship", "bogus")]:
-            self.tu(*self.args(*extra), ok=1)
-            self.assertEqual(cli.manifest(self.repo.path), original)
-            self.assertEqual(list((self.repo.path / '.intent/drafts').glob('*.json')), [])
-
-    def test_every_binding_key_is_checked_before_single_or_split_event(self):
-        from intentlib import cli
-        from intentlib.core import identity
-        original = cli.manifest(self.repo.path)
-        collision = identity(cli.config(self.repo.path), "binding", "review-b2")
-        for status in ["historical", "active"]:
-            with mock.patch.object(cli, "manifest", return_value={**original, "bindings": {collision: 1}}), \
-                    mock.patch.object(cli, "capture") as capture:
-                self.tu(*self.args("--bind", "x.py", "--bind", "x.py", "--binding-status", status,
-                                   "--applicability-rationale", "current constraint"), ok=1)
-                capture.assert_not_called()
-
-    def test_failed_second_event_can_resume_without_duplicate_intent(self):
-        from intentlib import cli
-        from intentlib.core import IntentError
-        original = cli.finalize
-        def fail_second(root, args):
-            if args.key.endswith('-bind'):
-                raise IntentError('injected second-event failure')
-            return original(root, args)
-        with mock.patch.object(cli, 'finalize', side_effect=fail_second):
-            self.tu(*self.args('--bind', 'x.py'), ok=1)
-        incomplete = self.store().get('promotions', self.node['id'])
-        self.assertFalse(incomplete['complete'])
-        result = self.tuj(*self.args('--bind', 'x.py:1-1'))
-        self.assertEqual(len(result['events']), 2)
-        self.assertEqual(result['events'][0], incomplete['events'][0])
-        self.assertEqual(len(cli.manifest(self.repo.path)['intents']), 1)
-        self.assertTrue(self.store().get('promotions', self.node['id'])['complete'])
-        self.tu(*self.args('--bind', 'x.py'), ok=1)
 
 
 class ForgeAliasContext(TrueUpTest):

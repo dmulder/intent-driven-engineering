@@ -1,6 +1,7 @@
 """Canonical storage, exact Git snapshots, and structural transition validation."""
 import base64
 from contextlib import contextmanager
+from contextvars import ContextVar
 import difflib
 from functools import lru_cache
 import hashlib
@@ -85,9 +86,24 @@ def write_json(path, value, immutable=False):
     os.replace(temp, path)
 
 
+_GIT_CONTEXT = ContextVar("intentctl_git_context", default=None)
+
+
+@contextmanager
+def git_environment(env, git_args=()):
+    """Scope explicit-repository callers without changing normal alternate-index use."""
+    token = _GIT_CONTEXT.set((env, tuple(git_args)))
+    try:
+        yield
+    finally:
+        _GIT_CONTEXT.reset(token)
+
+
 def git(root, *args, input=None, ok=(0,)):
-    result = subprocess.run(["git", "-C", str(root), *args], input=input,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    context = _GIT_CONTEXT.get()
+    git_args, env = (context[1], context[0]) if context else ((), None)
+    result = subprocess.run(["git", *git_args, "-C", str(root), *args], input=input,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if result.returncode not in ok:
         raise IntentError(f"git {' '.join(args)}: {result.stderr.decode(errors='replace').strip()}")
     return result.stdout
@@ -588,9 +604,16 @@ def validate(entries, base_entries=None, *, enforce_schema_definitions=True):
     if base is None:
         if store.baseline["files"] != inventory(entries):
             store.error("BASELINE", ".intent/baseline.json", "first import must exactly inventory staged source; run baseline after staging source")
-        # No fictitious pre-import event history is permitted.
+        # A retrospective import records our reconstruction NOW; it never claims that
+        # these metadata events occurred in the original Git commits. Reuse ordinary
+        # transition validation against the unchanged unknown-provenance baseline.
         if store.events or store.intents or store.bindings:
-            store.error("BOOTSTRAP", ".intent", "initial import must be an unknown baseline only; introduce intent in a subsequent transaction")
+            if store.errors or any(e["kind"] != "retrospective-import" or e["changes"] for e in store.events.values()):
+                store.error("BOOTSTRAP", ".intent", "initial import must be an unknown baseline or explicit retrospective imports")
+                return store.errors
+            bootstrap = {p: v for p, v in entries.items() if not p.startswith((".intent/intents/", ".intent/bindings/", ".intent/events/"))}
+            bootstrap[".intent/manifests/current.json"] = ("100644", canonical(EMPTY_MANIFEST) + b"\n")
+            return validate(entries, bootstrap, enforce_schema_definitions=enforce_schema_definitions)
         return store.errors
     old_events = base.manifest["events"]
     if store.manifest["events"][:len(old_events)] != old_events:
@@ -632,6 +655,9 @@ def validate(entries, base_entries=None, *, enforce_schema_definitions=True):
     for event_id in new_events:
         event = store.events[event_id]
         changes = event["changes"]
+        if event["kind"] == "retrospective-import":
+            if changes or event["provenance"] != "unknown" or any(t["action"] != "import" for t in event["intent_transitions"]):
+                store.error("HISTORICAL_IMPORT", event_id, "retrospective imports must be metadata-only, unknown-provenance import transitions")
         paths = [c["path"] for c in changes]
         if len(paths) != len(set(paths)):
             store.error("EVENT_PATH", event_id, "duplicate changed path")
@@ -659,8 +685,17 @@ def validate(entries, base_entries=None, *, enforce_schema_definitions=True):
             if action == "introduce":
                 if old_intent or not owned_intents or transition["from_revision"] is not None:
                     store.error("TRANSITION", event_id, f"{i}: introduce requires a new intent")
-            elif not old_intent:
+            elif action != "import" and not old_intent:
                 store.error("TRANSITION", event_id, f"{i}: action requires existing intent")
+            if action == "import":
+                if event["kind"] != "retrospective-import" or changes or event["provenance"] != "unknown":
+                    store.error("HISTORICAL_IMPORT", event_id, "import requires an explicit metadata-only retrospective-import event")
+                if not owned_intents or any(v["kind"] != "retrospective" or not v.get("reconstruction") for v in owned_intents):
+                    store.error("HISTORICAL_IMPORT", i, "import requires reconstructed retrospective intent revisions")
+                if old_intent and (store.events[old_intent["created_by_event"]]["kind"] != "retrospective-import" or
+                                   not old_intent.get("reconstruction") or not new_intent or
+                                   old_intent["reconstruction"]["node_id"] != new_intent.get("reconstruction", {}).get("node_id")):
+                    store.error("HISTORICAL_IMPORT", i, "import cannot replace unrelated or manually authored intent")
             if action in ("preserve", "rebind", "unapply") and owned_intents:
                 store.error("TRANSITION", event_id, f"{i}: {action} cannot change the intent itself")
             if action in ("modify", "retire", "supersede") and not owned_intents:
@@ -670,6 +705,10 @@ def validate(entries, base_entries=None, *, enforce_schema_definitions=True):
             old_binding = current_bindings.get(b)
             if b and old_binding and old_binding["intent_id"] != i:
                 store.error("TRANSITION", event_id, f"{b}: intent mismatch")
+            if action == "import":
+                imported = [store.bindings[(r["id"], r["revision"])] for r in event["records"] if r["type"] == "binding" and r["id"] == b]
+                if any(v["status"] != "historical" or verification_of(v)["status"] != "pending" for v in imported):
+                    store.error("HISTORICAL_IMPORT", b, "imported bindings must be historical with pending verification")
             declared = transition["binding_revisions"]
             owned_bindings = [store.bindings[(r["id"], r["revision"])] for r in event["records"] if r["type"] == "binding" and r["id"] == b]
             if declared != [v["revision"] for v in owned_bindings]:

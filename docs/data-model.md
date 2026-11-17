@@ -57,3 +57,19 @@ Each declaration identifies an intent, optional binding, action, old/new current
 - Preserve/rebind with source changes require successor binding revisions.
 
 Old binding pins remain accessible after intent evolution. An `unknown` provenance declaration acknowledges missing coverage of unbound legacy before-bytes but cannot excuse any known binding's required transition and cannot leave newly introduced after-bytes unbound. `known` requires changed ranges to be covered on both existing sides of the event.
+
+## Reconstructed project history
+
+An optional intent `reconstruction` object retains source commit IDs, method,
+basis, uncertainty, pending verification, and the analysis history (findings,
+quotes, refinements, endings and relationships). These are normal versioned intent
+records. Historical bindings pin original source blobs and ranges; ordinary
+`explain`, `history`, and `report` expose them without a secondary database.
+
+The `import` transition belongs only to a metadata-only `retrospective-import`
+event with unknown provenance. It may introduce or append reconstructed intent
+revisions and historical bindings with pending verification. It cannot change
+source, override manually authored intent, create governing bindings, or claim
+contemporaneous capture or independent verification. An initial unknown baseline
+may be accompanied by these explicit import events; existing baselines and records
+remain immutable. See [true-up](trueup.md).

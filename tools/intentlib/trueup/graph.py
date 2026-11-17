@@ -1,4 +1,4 @@
-"""The pseudo-intent graph: nodes are evolving decisions, edges are evidenced relations.
+"""The internal analysis graph: nodes are evolving decisions, edges are evidenced relations.
 
 The graph is a pure fold over (commit order, per-commit findings, persisted link decisions), so it
 can always be rebuilt from durable records. Merging two findings into one evolving node requires
@@ -287,58 +287,3 @@ def revert_decisions(graph, findings, reverted_shas, message):
                             "evidence": [{"ref": "C0", "quote": f"This reverts commit {sha_}"}],
                             "explanation": "commit message states it reverts the commit that introduced this decision"})
     return out
-
-
-# ---------------------------------------------------------------------------------------------
-# Present-day reconciliation (conservative, never authoritative)
-
-APPLICABILITY_NOTE = ("Heuristic only: derived from Git rename/modify status between the last cited commit and the selected "
-                      "snapshot. It does not establish that the decision still holds, and it is not a canonical constraint.")
-
-
-def applicability(repo, node, target_rev, mapping_cache, gitscan):
-    """Describe how a historical decision may relate to the selected snapshot."""
-    result = {"status": "unknown", "verified": False, "basis": [], "note": APPLICABILITY_NOTE, "path_mappings": []}
-    if node["lifecycle"] != ACTIVE:
-        result["status"] = "ended-in-history"
-        result["basis"].append(f"later evidence {', '.join(sorted({e['relation'] for e in node['ended_by']}))} it "
-                               f"(commit {node['ended_by'][0]['commit'][:12]}); verify the ending was not itself later reversed")
-    if not node["paths"]:
-        result["basis"].append("no file paths were associated with this decision")
-        return result
-    last = node["last_commit"]
-    if last not in mapping_cache:
-        try:
-            mapping_cache[last] = gitscan.map_paths(repo, last, target_rev)
-        except Exception as exc:
-            mapping_cache[last] = (None, str(exc))
-    mapping, truncated = mapping_cache[last]
-    if mapping is None:
-        result["basis"].append(f"path reconciliation unavailable: {truncated}")
-        return result
-    states = []
-    for path in node["paths"]:
-        status = mapping.get(path)
-        if status is None:
-            exists = repo.path_exists(target_rev, path)
-            entry = {"from": path, "to": path if exists else None, "state": "unchanged-since" if exists else "absent"}
-        elif status[0] == "D":
-            entry = {"from": path, "to": None, "state": "deleted-since"}
-        elif status[0] == "R" or status[0] == "C":
-            entry = {"from": path, "to": status[1], "state": "renamed-or-copied-since (proposed)", "similarity": status[2]}
-        else:
-            entry = {"from": path, "to": path, "state": "modified-since"}
-        states.append(entry)
-    result["path_mappings"] = states
-    kinds = {s["state"] for s in states}
-    if result["status"] != "ended-in-history":
-        if kinds == {"absent"} or kinds == {"deleted-since"} or kinds <= {"absent", "deleted-since"}:
-            result["status"] = "path-absent"
-        elif "modified-since" in kinds or any(k.startswith("renamed") for k in kinds):
-            result["status"] = "candidate-needs-reassessment"
-        else:
-            result["status"] = "candidate-paths-unchanged"
-        result["basis"].append("; ".join(sorted(kinds)))
-    if truncated:
-        result["basis"].append("path mapping truncated by size limit")
-    return result

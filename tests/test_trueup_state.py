@@ -328,7 +328,7 @@ class StatusSeparatesCoverage(TrueUpTest):
         self.assertFalse(cov["complete"])
         text = self.tu("status")[1]
         self.assertIn("COMPLETE: False", text)
-        self.assertIn("NON-AUTHORITATIVE", text)
+        self.assertIn("RECONSTRUCTED INTENT", text)
         report = self.tuj("report")
         self.assertEqual(report["coverage"]["incomplete_total"], 1)
         self.assertEqual(report["usage_across_runs"]["ai_calls"] > 0, True)

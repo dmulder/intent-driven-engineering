@@ -1,4 +1,7 @@
-"""Durable true-up state: one directory, one writer, atomic per-record files.
+"""Disposable true-up processing checkpoints: one writer, atomic per-record files.
+
+The durable results are normal .intent intents, bindings, objects and import events.
+This ignored cache contains inputs and progress for resuming expensive analysis.
 
 Layout (all JSON, relative to the state directory):
 
@@ -14,7 +17,7 @@ Layout (all JSON, relative to the state directory):
   circuits.json               provider/forge circuit-breaker state
   runs/RUNID.json             one record per `run` invocation
   events.jsonl                append-only audit log
-  reviews/, promotions/       maintainer decisions about candidates (local, not canonical)
+  imports/                   status of the last canonical import
 """
 import json
 import os
@@ -22,18 +25,22 @@ from pathlib import Path
 import threading
 
 from . import STATE_FORMAT
-from .util import FatalStateError, TrueUpError, dumps, iso, read_json, shard, sha, write_json
+from .util import FatalStateError, TrueUpError, assert_safe_path, dumps, iso, read_json, shard, sha, write_json
 
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None
 
-STATE_DIRNAME = "intent-trueup"
+STATE_DIRNAME = "trueup"
 
 
 def default_state_dir(repo):
-    return Path(repo.common_dir) / STATE_DIRNAME
+    if repo.toplevel is None:
+        raise TrueUpError("true-up needs a working tree to write .intent data")
+    path = Path(repo.toplevel) / ".intent" / "cache" / STATE_DIRNAME
+    assert_safe_path(path)
+    return path
 
 
 class Store:
@@ -50,6 +57,7 @@ class Store:
     @classmethod
     def create(cls, path, repo, config):
         store = cls(path)
+        assert_safe_path(path)
         if cls.exists(path):
             raise TrueUpError(f"a true-up store already exists at {path}; use `trueup extend` or choose --state-dir")
         try:
@@ -62,10 +70,10 @@ class Store:
             raise TrueUpError(f"a true-up store already exists at {path}; use `trueup extend` or choose --state-dir")
         write_json(store.path / "config.json", config)
         write_json(store.path / "meta.json", {
-            "format": STATE_FORMAT, "kind": "intent-trueup-store", "store_id": sha({"path": str(path), "at": iso(), "pid": os.getpid()})[:16],
+            "format": STATE_FORMAT, "kind": "intent-analysis-cache", "store_id": sha({"path": str(path), "at": iso(), "pid": os.getpid()})[:16],
             "created_at": iso(), "repository": {"toplevel": str(repo.toplevel) if repo.toplevel else None,
                                                  "git_dir": str(repo.common_dir)},
-            "authority": "non-authoritative; never read by canonical validation"})
+            "authority": "disposable processing cache; results are canonical .intent records"})
         return store
 
     @classmethod
@@ -82,8 +90,9 @@ class Store:
         """Exclusive writer lock. Held until release(); a second writer fails fast."""
         if self._lock_fd is not None:
             return
+        assert_safe_path(self.path / "lock")
         self.path.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(self.path / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = os.open(self.path / "lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             if fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

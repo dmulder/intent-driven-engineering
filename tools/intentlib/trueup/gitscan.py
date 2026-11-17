@@ -382,7 +382,11 @@ def inspect_commit(repo, sha, limits):
         raw_args = ["diff-tree", "--root", "--no-commit-id", "-r", "-z", "--raw", *DIFF_ARGS, sha]
         patch_args = ["diff-tree", "--root", "--no-commit-id", "-r", "-p", f"-U{limits['context_lines']}", *DIFF_ARGS, sha]
     raw_diff, raw_truncated = repo.run_capped(*raw_args, cap=cap_raw)
-    entries = parse_raw_diff(raw_diff)
+    all_entries = parse_raw_diff(raw_diff)
+    entries = [e for e in all_entries if not e["path"].startswith(".intent/")]
+    result["metadata_only"] = bool(all_entries) and not entries and not raw_truncated
+    # Never send retained source objects or previously generated intent back to a model.
+    patch_args += ["--", ":(top,exclude).intent/**"]
     if raw_truncated:
         limitations.append("changed-path list truncated at the raw diff byte limit")
         result["diff_truncated"] = True
@@ -421,7 +425,7 @@ def inspect_commit(repo, sha, limits):
         result["merge"] = {"first_parent": parents[0], "other_parents": parents[1:],
                            "merged_commit_count": int(merged.decode().strip() or 0),
                            "merged_commits": [{"sha": a, "subject": b} for a, b in listed]}
-        combined, c_truncated = repo.run_capped("diff-tree", "--cc", "--no-commit-id", "-r", "-p", "-U3", *DIFF_ARGS[:-1], sha,
+        combined, c_truncated = repo.run_capped("diff-tree", "--cc", "--no-commit-id", "-r", "-p", "-U3", *DIFF_ARGS[:-1], sha, "--", ":(top,exclude).intent/**",
                                                 cap=limits["max_combined_bytes"])
         result["combined_diff"] = combined.decode("utf-8", "backslashreplace") or None
         if c_truncated:
