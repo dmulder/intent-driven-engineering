@@ -22,7 +22,7 @@ The checked-in `hooks/` scripts are templates; generated dispatchers provide cha
 | Rebase / cherry-pick | Valid for compatible source chains and nonconflicting metadata; no automatic repair |
 | Revert | Raw inverse metadata deletion is invalid; make a compensating source event retaining history |
 | Detached HEAD | Supported |
-| Linked worktrees | Each uses its own index/HEAD; hooks can be shared; writers within one worktree must serialize |
+| Linked worktrees | Each uses its own index/HEAD; hooks can be shared; mutating commands take a per-worktree lock (`intentctl.lock` in the worktree's Git directory) and fail fast when another writer is active |
 | Concurrent branches | Distinct keys coexist; same-ID conflicting revisions require explicit reconciliation |
 | Metadata conflicts | Invalid JSON/unmerged index rejected; resolve deliberately |
 | Submodules / non-UTF-8 filenames | Explicitly rejected |

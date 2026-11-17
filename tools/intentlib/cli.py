@@ -1,5 +1,6 @@
 """Command-line workflows. Drafts are editable; finalization never stages files."""
 import argparse
+from contextlib import nullcontext
 import copy
 import os
 import re
@@ -11,12 +12,15 @@ import sys
 from .core import (EMPTY_MANIFEST, IntentError, ValidationError, Store, affected_by_changes,
                    canonical, changes_between, digest, git, head, identity, inventory,
                    live_target, loads, metadata, put_object, record_path, ref, root_path,
-                   safe_path, seal, snapshot, source, validate, verification_of, write_json)
+                   safe_path, seal, snapshot, source, validate, verification_of, writer_lock, write_json)
 from . import report
 from .schema import ACTIONS, SCHEMAS, check, published
 
 
 def output(value, as_json=False):
+    if isinstance(value, dict) and "schema_version" not in value:
+        # Records carry schema_version; command results carry output_version. Fields are only added within a version.
+        value = {"output_version": OUTPUT_VERSION, **value}
     if as_json:
         print(canonical(value).decode())
     elif isinstance(value, dict) and "errors" in value and "valid" in value:
@@ -646,6 +650,13 @@ def retrospective(root, args, result):
     return result
 
 
+MUTATING = frozenset(("init", "deploy", "uninstall-hooks", "baseline", "capture", "intent-create", "intent-revise",
+                      "bind", "rebind", "declare", "finalize"))
+OUTPUT_VERSION = 1
+
+
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv[:1] == ["trueup"]:
@@ -654,73 +665,74 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         root = root_path()
-        if args.command == "init":
-            from .adoption import deployment_plan, deploy
-            if not args.no_instructions:
-                deployment_plan(root)  # Check conflicts before creating metadata or hooks.
-            result = initialize(root, args.no_hooks)
-            if not args.no_instructions:
-                result["instructions"] = deploy(root)
-        elif args.command == "deploy":
-            from .adoption import deploy
-            result = deploy(root, args.update)
-        elif args.command in ("audit", "reconcile", "watch"):
-            from .adoption import audit, reconciliation
-            if args.command == "watch":
-                import math
-                if not math.isfinite(args.interval) or args.interval <= 0:
-                    raise IntentError("--interval must be a positive finite number")
-                previous = None
-                cache = {}
-                try:
-                    while True:
-                        try:
-                            result = audit(root, args.since, cache=cache)
-                        except ValidationError as exc:
-                            result = {"needs_attention": True, "valid": False, "errors": exc.errors}
-                        except (IntentError, OSError, KeyError, IndexError) as exc:
-                            result = {"needs_attention": True, "valid": False, "errors": [
-                                {"code": "OPERATION", "path": ".intent", "message": str(exc)}]}
-                        fingerprint = canonical(result)
-                        if fingerprint != previous:
-                            output(result, args.json)
-                            sys.stdout.flush()
-                            previous = fingerprint
-                        if args.once:
-                            return int(result["needs_attention"])
-                        time.sleep(args.interval)
-                except KeyboardInterrupt:
+        with writer_lock(root) if args.command in MUTATING else nullcontext():
+            if args.command == "init":
+                from .adoption import deployment_plan, deploy
+                if not args.no_instructions:
+                    deployment_plan(root)  # Check conflicts before creating metadata or hooks.
+                result = initialize(root, args.no_hooks)
+                if not args.no_instructions:
+                    result["instructions"] = deploy(root)
+            elif args.command == "deploy":
+                from .adoption import deploy
+                result = deploy(root, args.update)
+            elif args.command in ("audit", "reconcile", "watch"):
+                from .adoption import audit, reconciliation
+                if args.command == "watch":
+                    import math
+                    if not math.isfinite(args.interval) or args.interval <= 0:
+                        raise IntentError("--interval must be a positive finite number")
+                    previous = None
+                    cache = {}
+                    try:
+                        while True:
+                            try:
+                                result = audit(root, args.since, cache=cache)
+                            except ValidationError as exc:
+                                result = {"needs_attention": True, "valid": False, "errors": exc.errors}
+                            except (IntentError, OSError, KeyError, IndexError) as exc:
+                                result = {"needs_attention": True, "valid": False, "errors": [
+                                    {"code": "OPERATION", "path": ".intent", "message": str(exc)}]}
+                            fingerprint = canonical(result)
+                            if fingerprint != previous:
+                                output(result, args.json)
+                                sys.stdout.flush()
+                                previous = fingerprint
+                            if args.once:
+                                return int(result["needs_attention"])
+                            time.sleep(args.interval)
+                    except KeyboardInterrupt:
+                        return 0
+                result = reconciliation(root, args.since) if args.command == "reconcile" else audit(root, args.since)
+                output(result, args.json)
+                return int(result.get("audit", result)["needs_attention"])
+            elif args.command == "report":
+                from .adoption import report, review_state
+                if not args.json:
+                    print(report(root), end="")
                     return 0
-            result = reconciliation(root, args.since) if args.command == "reconcile" else audit(root, args.since)
-            output(result, args.json)
-            return int(result.get("audit", result)["needs_attention"])
-        elif args.command == "report":
-            from .adoption import report, review_state
-            if not args.json:
-                print(report(root), end="")
-                return 0
-            result = review_state(root)
-        elif args.command == "uninstall-hooks":
-            install_hooks(root, uninstall=True)
-            result = {"hooks": "uninstalled; original hooks restored"}
-        elif args.command == "baseline":
-            result = make_baseline(root)
-        elif args.command == "capture":
-            result = capture(root, args)
-        elif args.command in ("intent-create", "intent-revise"):
-            result = add_intent(root, args)
-        elif args.command in ("bind", "rebind"):
-            result = add_binding(root, args)
-        elif args.command == "declare":
-            result = declare(root, args)
-        elif args.command == "finalize":
-            result = finalize(root, args)
-        elif args.command == "validate":
-            result = run_validation(root, args)
-        else:
-            result = query(root, args)
-            if args.command in ("explain", "history"):
-                result = retrospective(root, args, result)
+                result = review_state(root)
+            elif args.command == "uninstall-hooks":
+                install_hooks(root, uninstall=True)
+                result = {"hooks": "uninstalled; original hooks restored"}
+            elif args.command == "baseline":
+                result = make_baseline(root)
+            elif args.command == "capture":
+                result = capture(root, args)
+            elif args.command in ("intent-create", "intent-revise"):
+                result = add_intent(root, args)
+            elif args.command in ("bind", "rebind"):
+                result = add_binding(root, args)
+            elif args.command == "declare":
+                result = declare(root, args)
+            elif args.command == "finalize":
+                result = finalize(root, args)
+            elif args.command == "validate":
+                result = run_validation(root, args)
+            else:
+                result = query(root, args)
+                if args.command in ("explain", "history"):
+                    result = retrospective(root, args, result)
         output(result, args.json)
         if args.command == "status" and args.strict and result["attention"]:
             return 1

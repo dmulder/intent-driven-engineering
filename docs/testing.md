@@ -2,6 +2,8 @@
 
 Run `python3 -m unittest discover -s tests -v`. Tests require a local Git executable and Python 3.10+; they do not access the network. Every integration case creates and cleans up its own repository, identity configuration, CLI copy, index, and hooks. Global/system Git configuration is excluded. Unit tests check canonicalization against a fixed known SHA-256 value and ensure every published schema keyword is supported.
 
+Agent-surface tests build deterministic fixtures modeled on Telos's hard scenarios (a policy value with a recorded decision, a cross-module invariant) plus a benign-edit false-positive control, and assert the governing text is retrievable per file. They do not measure agent behavior; see [evaluation](evaluation.md). A multi-process test races six `bind` commands at one draft and asserts no accepted update is lost; it was mutation-checked by disabling the lock. A docs-as-test extracts every documented `intentctl` invocation and verifies its subcommand and flags against the parser, and that every subcommand is documented.
+
 Integration assertions focus on externally observable results: accepted/rejected real commits, exact staged versus working bytes, retained revisions, overlap, lineage, reassessment, and diagnostics. Multi-step workflows are intentional for history and atomic-staging guarantees; they complement small failure-focused tests rather than replacing them. No mocked Git output or sleep-based synchronization is used.
 
 Review of the initial tests identified and corrected these gaps:

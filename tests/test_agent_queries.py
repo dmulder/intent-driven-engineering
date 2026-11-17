@@ -173,7 +173,7 @@ class AgentQueryTests(RepoTest):
         self.write("limits.py", "LOGIN_RPM = 10\n")
         self.write("boards.py", "def archive(board):\n    board.active = False\n")
         self.write("tasks.py", "def create(board_id):\n    return {'board': board_id}\n")
-        self.git("add", ".")
+        self.git("add", "limits.py", "boards.py", "tasks.py")
         self.capture("domain")
         tasks, _ = self.intent("domain", "tasks-reference-live-boards", path="tasks.py",
                                requirements=("Every task references a live board",))

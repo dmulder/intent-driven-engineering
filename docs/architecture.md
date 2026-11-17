@@ -15,7 +15,7 @@ flowchart LR
   M --> E
 ```
 
-`tools/intentlib/core.py` owns serialization, Git snapshots, stores, and validation. `schema.py` defines both published schemas and their supported runtime schema subset. `cli.py` provides draft construction, record finalization, queries, installation, and Git transaction adapters. `tools/intentctl.py` is the portable entry point.
+`tools/intentlib/core.py` owns serialization, Git snapshots, stores, validation, and the per-worktree writer lock. `schema.py` defines both published schemas and their supported runtime schema subset. `cli.py` provides draft construction, record finalization, queries, installation, and Git transaction adapters. `report.py` holds the read-only agent surface (`context`, `coverage`, `list-intents`, decay signals); it recomputes every answer from the selected snapshot and never writes. `tools/intentctl.py` is the portable entry point.
 
 ## Independent histories
 
@@ -34,6 +34,10 @@ V1 deliberately implements explicit binding continuity rather than persistent fr
 A binding revision can move its target; `predecessors` on new bindings represent copy/split/consolidation lineage. Several successors may name one predecessor, or one successor may name several. End old applicability explicitly where appropriate. Retaining an old active binding is an explicit representation of copying rather than moving.
 
 Only bindings whose live ranges overlap a changed interval require explicit declarations and successor revisions. Unrelated bindings may keep older snapshot pins when equal-region mapping uniquely preserves their bytes; that mapping is coordinate maintenance, not an identity claim. Ambiguous transformations still require authoritative `rebind` declarations.
+
+## Agent-facing reads
+
+State lives only in committed canonical records, and agents read it through queries rather than through copies. Telos exports constraints into agent memory files; we decline that because a copy can drift and the instruction file is itself governed. `context` aggregates by path (one pass over the current heads, not one query per intent), orders by severity so `must` obligations come first, and reports unbound regions as unknown provenance. Freshness is structural: a binding pinned to an older intent revision, an active intent with no active binding, an unresolved binding, or failed verification. None of these prove a requirement is still true. See [lessons from Telos](telos-lessons.md).
 
 ## Why separate records?
 

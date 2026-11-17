@@ -205,7 +205,7 @@ def promote(root, store, repo, node, args):
             transitions.append(binding_id)
 
     def intent_body():
-        intent_cli.add_intent(root, argparse.Namespace(command="intent-create", event=key, key=key, status=status, kind="retrospective",
+        intent_cli.add_intent(root, argparse.Namespace(command="intent-create", event=key, key=key, status=status, kind="retrospective", severity=None,
                                                       title=text["title"], description=text["description"], rationale=text["rationale"],
                                                       requirement=text["requirements"], constraint=text["constraints"], related=args.related or []))
         if split or not bindings:

@@ -10,6 +10,10 @@
 - [x] Region-aware affected bindings with deterministic equal-region coordinate maintenance (no file-wide rebind tax).
 - [x] Stricter unknown provenance: newly introduced after-bytes require intent coverage.
 - [x] Binding verification states separate claimed preservation from independently supported conclusions.
+- [x] Telos-informed agent surface ([lessons](telos-lessons.md)): `context`, `coverage`, `list-intents`, decay signals in `status`/`doctor`, optional intent severity, and decision-time intent text in `capture`.
+- [x] Per-worktree writer lock for mutating commands, with a multi-process lost-update test.
+- [x] Versioned JSON command output and docs-as-tests for every documented command and flag.
+- [x] Memoized per-pair byte diffs; validating one pending event that rewrites `cli.py` and `core.py` exceeded 290 seconds (aborted); two such events now validate in about 95 seconds.
 - [x] True-up: resumable retrospective discovery of non-authoritative pseudo-intent from Git and forge history, with reviewed promotion into canonical records ([docs/trueup.md](trueup.md)).
 
 ## Repository adoption goals
@@ -31,13 +35,14 @@ communication to other agents and to humans reviewing why a change happened.
 
 ## Before production adoption
 
-1. Benchmark large histories, repetitive files, and many bindings. Add a bounded byte-diff strategy and incremental object/record reads. Cache interval and graph indexes only as reproducible derived data.
+1. Benchmark large histories, repetitive files, and many bindings. Add a bounded byte-diff strategy and incremental object/record reads. The byte diff remains quadratic (about 7.5 seconds for one 32 KB file pair); replacing it changes recorded event intervals, so it needs a versioned algorithm identifier rather than a silent swap. Cache interval and graph indexes only as reproducible derived data.
 2. Implement an explicit multi-parent reconciliation event and divergent revision model. Numeric revision conflicts currently require branch repair or rejection.
-3. Add transactional recovery/journaling for finalization and locking for concurrent writers in a worktree. Independent worktrees already isolate normal writes.
+3. Add transactional recovery/journaling for finalization. Concurrent writers in one worktree are now serialized by a lock; a crash between record writes still needs the manual recovery described in the architecture notes. Independent worktrees already isolate normal writes.
 4. Add complete resource limits and hostile-input testing. Verify installation on macOS and Windows; shell hook execution currently targets Linux.
 5. Add typed intent relationships and richer independently verified evidence with hashes, attestations, and signatures.
 6. Introduce first-class code fragment identities that survive moves/splits without replacing binding identity; keep location queries distinct from fragment/binding history queries.
-7. Reduce snapshot duplication by referencing Git blobs where a commit already stores the bytes, retaining overlay objects for intermediate states Git does not.
+7. Run the [evaluation protocol](evaluation.md) with live agents before claiming behavioral benefit. Decide on signed actor attribution in events; Telos's unauthenticated agent IDs were declined as untrustworthy.
+8. Reduce snapshot duplication by referencing Git blobs where a commit already stores the bytes, retaining overlay objects for intermediate states Git does not.
 
 ## True-up follow-ups
 
