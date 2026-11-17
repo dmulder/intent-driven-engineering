@@ -12,6 +12,7 @@ from .core import (EMPTY_MANIFEST, IntentError, ValidationError, Store, affected
                    canonical, changes_between, digest, git, head, identity, inventory,
                    live_target, loads, metadata, put_object, record_path, ref, root_path,
                    safe_path, seal, snapshot, source, validate, verification_of, write_json)
+from . import report
 from .schema import ACTIONS, SCHEMAS, check, published
 
 
@@ -186,12 +187,15 @@ def capture(root, args):
         raise IntentError("event creation key already exists; choose a distinct --key")
     paths = {c["path"] for c in changes}
     current_bindings = store.current("binding")
+    current_intents = store.current("intent")
     affected = affected_by_changes(current_bindings, changes, before, store.objects)
     required = []
     for b in affected.values():
         live = live_target(b, before, store.objects)
         required.append({"intent_id": b["intent_id"], "binding_id": b["id"],
                          "intent_revision": b["intent_revision"], "target": b["target"],
+                         "intent": report.brief(current_intents[b["intent_id"]], b["intent_revision"]),
+                         "verification": verification_of(b),
                          "live_target": ({"path": live["path"], "start": live["start"], "end": live["end"],
                                           "mode": live["mode"]} if live else None)})
     draft = {"event": event, "intents": [], "bindings": [], "required_declarations": required}
@@ -213,6 +217,8 @@ def add_intent(root, args):
                  "title": args.title, "description": args.description, "rationale": args.rationale,
                  "requirements": args.requirement or [], "constraints": args.constraint or [],
                  "related_intents": args.related or []}
+        if args.severity:
+            value["severity"] = args.severity
     else:
         i = args.id
         if i not in current["intents"]:
@@ -221,7 +227,7 @@ def add_intent(root, args):
         value = {**old, "revision": old["revision"] + 1, "previous_hash": old["content_hash"],
                  "created_by_event": draft["event"]["id"]}
         value.pop("content_hash", None)
-        for name in ("status", "kind", "title", "description", "rationale"):
+        for name in ("status", "kind", "title", "description", "rationale", "severity"):
             if getattr(args, name) is not None:
                 value[name] = getattr(args, name)
         for arg, field in (("requirement", "requirements"), ("constraint", "constraints"), ("related", "related_intents")):
@@ -421,6 +427,8 @@ def query(root, args):
     if store.errors:
         raise IntentError(str(store.errors))
     intents, bindings = store.current("intent"), store.current("binding")
+    if args.command in report.REPORTS:
+        return report.run(args.command, store, entries, args)
     if args.command in ("show-intent", "show-binding"):
         kind = args.command[5:]
         collection = getattr(store, kind + "s")
@@ -429,13 +437,11 @@ def query(root, args):
             raise IntentError("unknown identity")
         return collection[(args.id, args.revision or revisions[-1])]
     if args.command in ("status", "doctor"):
-        stale = [b["id"] for b in bindings.values() if b["status"] in ("active", "unresolved") and
-                 b["intent_revision"] != store.manifest["intents"].get(b["intent_id"])]
+        fresh = report.freshness(store)
         if args.command == "doctor":
             result = run_validation(root, argparse.Namespace(push=False, range=None, commit=None, base=None, staged=False))
-            return {**result, "reassessment": stale, "repair": "repair drafts; append corrective revisions for committed history"}
-        return {"intents": len(intents), "bindings": len(bindings), "events": len(store.events),
-                "reassessment": stale, "unresolved": [b["id"] for b in bindings.values() if b["status"] == "unresolved"]}
+            return {**result, **fresh, "repair": "repair drafts; append corrective revisions for committed history"}
+        return {"intents": len(intents), "bindings": len(bindings), "events": len(store.events), **fresh}
     if args.command == "impact":
         if args.id not in intents:
             raise IntentError("unknown intent")
@@ -542,7 +548,8 @@ def parser():
     group.add_argument("--range")
     group.add_argument("--commit")
     v.add_argument("--base")
-    for name in ("status", "doctor", "explain", "history", "show-intent", "show-binding", "impact"):
+    for name in ("status", "doctor", "explain", "history", "show-intent", "show-binding", "impact",
+                 "context", "coverage", "list-intents"):
         q = command(name)
         q.add_argument("--at", help="query committed snapshot REV instead of working tree")
         if name in ("explain", "history"):
@@ -550,6 +557,18 @@ def parser():
             q.add_argument("--trueup-state", help="true-up state directory (default: <git-common-dir>/intent-trueup, or $INTENTCTL_TRUEUP_STATE_DIR)")
             q.add_argument("--no-retrospective", action="store_true",
                            help="omit the optional non-authoritative `intentctl trueup` section even if a true-up store exists")
+        elif name == "context":
+            q.add_argument("paths", nargs="+", metavar="PATH", help="governed file or directory (use . for all)")
+        elif name == "coverage":
+            q.add_argument("paths", nargs="*", metavar="PATH", help="limit to files or directories")
+        elif name == "list-intents":
+            q.add_argument("--status", choices=["active", "retired", "superseded", "all"], default="active",
+                           help="default active: retired and superseded intent is evidence, not a current constraint")
+            q.add_argument("--contains", help="case-insensitive text match over title, rationale, requirements, constraints")
+            q.add_argument("--limit", type=int)
+        elif name == "status":
+            q.add_argument("--strict", action="store_true",
+                           help="exit 1 when reassessment, unresolved, orphaned, or failed-verification items exist")
         elif name in ("show-intent", "show-binding", "impact"):
             q.add_argument("id")
             if name != "impact":
@@ -573,6 +592,8 @@ def parser():
             c.add_argument("--" + flag, required=name == "intent-create")
         c.add_argument("--kind", default="requirement" if name == "intent-create" else None)
         c.add_argument("--status", choices=["active", "retired", "superseded"], default="active" if name == "intent-create" else None)
+        c.add_argument("--severity", choices=list(report.SEVERITIES),
+                       help="must (default when omitted) binds all work; should needs recorded rationale to deviate; prefer is advisory")
         for flag in ("requirement", "constraint", "related"):
             c.add_argument("--" + flag, action="append")
     for name in ("bind", "rebind"):
@@ -701,6 +722,8 @@ def main(argv=None):
             if args.command in ("explain", "history"):
                 result = retrospective(root, args, result)
         output(result, args.json)
+        if args.command == "status" and args.strict and result["attention"]:
+            return 1
         return 1 if isinstance(result, dict) and result.get("valid") is False else 0
     except ValidationError as exc:
         output({"valid": False, "errors": exc.errors}, args.json)

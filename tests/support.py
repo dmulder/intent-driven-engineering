@@ -14,6 +14,8 @@ from intentlib.core import canonical, loads, seal, write_json
 
 
 class RepoTest(unittest.TestCase):
+    legacy_files = {}
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -26,6 +28,8 @@ class RepoTest(unittest.TestCase):
         self.git("config", "core.autocrlf", "false")
         self.write(".gitignore", "__pycache__/\n.intent/drafts/\n.intent/cache/\n")
         self.write("auth.py", (PROJECT / "tests/fixtures/auth.py").read_bytes())
+        for path, data in self.legacy_files.items():
+            self.write(path, data)
         self.git("add", ".")
         self.ctl("init")
         self.git("add", ".intent")

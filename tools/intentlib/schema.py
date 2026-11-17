@@ -37,10 +37,12 @@ COMMON = {"schema_version": VERSION, "id": ID, "revision": REV,
           "previous_hash": NULLS, "created_by_event": ID, "content_hash": HASH}
 BINDING_REQUIRED = list(COMMON) + ["intent_id", "intent_revision", "relationship", "status",
                                    "target", "rationale", "predecessors"]
+INTENT_PROPERTIES = {**COMMON, "status": {"type": "string", "enum": ["active", "retired", "superseded"]},
+    "kind": TEXT, "title": TEXT, "description": TEXT, "rationale": TEXT,
+    "requirements": arr(TEXT), "constraints": arr(TEXT), "related_intents": arr(ID),
+    "severity": {"type": "string", "enum": ["must", "should", "prefer"]}}
 SCHEMAS = {
-    "intent": obj({**COMMON, "status": {"type": "string", "enum": ["active", "retired", "superseded"]},
-        "kind": TEXT, "title": TEXT, "description": TEXT, "rationale": TEXT,
-        "requirements": arr(TEXT), "constraints": arr(TEXT), "related_intents": arr(ID)}),
+    "intent": obj(INTENT_PROPERTIES, required=[k for k in INTENT_PROPERTIES if k != "severity"]),
     "binding": obj({**COMMON, "intent_id": ID, "intent_revision": REV,
         "relationship": {"type": "string", "enum": ["implements", "constrained-by", "motivated-by", "preserves", "verifies", "historically-derived-from"]},
         "status": {"type": "string", "enum": ["active", "ended", "unresolved", "historical"]},
