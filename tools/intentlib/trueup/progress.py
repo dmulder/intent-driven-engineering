@@ -64,8 +64,18 @@ class Progress:
                        f'{self.total - done} remaining | {elapsed}s | {self.phase}')
             if self.terminal:
                 summary = f'{done}/{self.total} ok:{c["success"]} fail:{c["failed"]} part:{c["partial"]} {elapsed}s'
-                room = max(0, columns - width - len(summary) - 5)
-                message = f'[{bar}] {summary} {self.phase[:room]}'
+                summaries = (summary, f'{done}/{self.total} +{c["success"]} x{c["failed"]} ~{c["partial"]}',
+                             f'{done}/{self.total}')
+                # Leave the last column unused to avoid terminal auto-wrap.
+                available = max(0, columns - 1)
+                summary = next((s for s in summaries if width + 3 + len(s) <= available), None)
+                if summary is None:
+                    message = f'{done}/{self.total}'[:available]
+                else:
+                    message = f'[{bar}] {summary}'
+                    room = max(0, available - width - len(summary) - 4)
+                    if room:
+                        message += f' {self.phase[:room]}'
             prefix = '\r\033[2K' if self.terminal else ''
             self.stream.write(prefix + message + ('\n' if final or not self.terminal else ''))
             self.stream.flush()

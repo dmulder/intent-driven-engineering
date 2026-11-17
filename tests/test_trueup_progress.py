@@ -1,5 +1,7 @@
 """Progress must remain visible while a worker is blocked and preserve machine output."""
 import io
+import os
+import re
 import threading
 import unittest
 from unittest.mock import patch
@@ -29,8 +31,9 @@ class RecordingStream(io.StringIO):
 class ProgressTests(unittest.TestCase):
     def test_heartbeat_without_completed_work_and_cleanup(self):
         stream = RecordingStream()
-        with Progress(811, stream, interval=0.01) as progress:
-            progress.waiting('waiting for abc123')
+        progress = Progress(811, stream, interval=0.01)
+        progress.waiting('waiting for abc123')
+        with progress:
             self.assertTrue(stream.heartbeat.wait(2))
             self.assertIn('0/811 processed', stream.getvalue())
             self.assertIn('waiting for abc123', stream.getvalue())
@@ -43,7 +46,6 @@ class ProgressTests(unittest.TestCase):
             stream = RecordingStream(terminal=True)
             with patch.dict('os.environ', {'TERM': 'xterm'}, clear=True):
                 if no_color:
-                    import os
                     os.environ['NO_COLOR'] = '1'
                 with Progress(3, stream) as progress:
                     progress.completed({'analysis': {'status': 'analyzed'}})
@@ -54,6 +56,26 @@ class ProgressTests(unittest.TestCase):
             self.assertIn('ok:1 fail:1 part:1', text)
             self.assertEqual('\033[31m' in text, not no_color)
             self.assertTrue(text.endswith('\n'))
+
+    def test_terminal_frames_fit_narrow_widths_with_and_without_color(self):
+        for columns in (1, 2, 5, 8, 12, 20, 40, 80, 120):
+            for no_color in (False, True):
+                with self.subTest(columns=columns, no_color=no_color):
+                    stream = RecordingStream(terminal=True)
+                    env = {'TERM': 'xterm', **({'NO_COLOR': '1'} if no_color else {})}
+                    with patch.dict('os.environ', env, clear=True), patch(
+                            'intentlib.trueup.progress.shutil.get_terminal_size',
+                            return_value=os.terminal_size((columns, 24))):
+                        progress = Progress(811, stream)
+                        progress.waiting('waiting for abc123 (provider or local work)')
+                        progress.render()
+                        progress.counts.update(success=500, failed=200, partial=111)
+                        progress.render(final=True)
+                    text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', stream.getvalue())
+                    for line in text.splitlines():
+                        self.assertLessEqual(len(line), max(0, columns - 1))
+                    if columns == 120:
+                        self.assertIn('ok:500 fail:200 part:111', text)
 
     def test_exception_closes_display(self):
         stream = RecordingStream()
