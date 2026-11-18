@@ -13,7 +13,7 @@ from .core import (EMPTY_MANIFEST, IntentError, ValidationError, Store, affected
                    canonical, changes_between, digest, git, head, identity, inventory,
                    live_target, loads, metadata, put_object, record_path, ref, root_path,
                    safe_path, seal, snapshot, source, validate, verification_of, writer_lock, write_json)
-from . import report
+from . import report, storage
 from .schema import ACTIONS, SCHEMAS, check, published
 
 
@@ -34,7 +34,7 @@ def output(value, as_json=False):
 
 def read_json(path):
     try:
-        return loads(Path(path).read_bytes())
+        return loads(storage.read_record(path))
     except OSError as exc:
         raise IntentError(str(exc)) from exc
 
@@ -187,7 +187,7 @@ def capture(root, args):
              "description": args.description, "rationale": args.rationale,
              "changes": changes, "intent_transitions": [], "provenance": args.provenance,
              "verification": [], "records": []}
-    if (root / record_path("event", event["id"])).exists() or draft_path(root, args.key).exists():
+    if event["id"] in store.events or draft_path(root, args.key).exists():
         raise IntentError("event creation key already exists; choose a distinct --key")
     paths = {c["path"] for c in changes}
     current_bindings = store.current("binding")
@@ -332,7 +332,7 @@ def finalize(root, args):
             if problems:
                 raise IntentError(str(problems))
             path = record_path(kind, value["id"], value["revision"])
-            if (root / path).exists():
+            if storage.record_exists(root / path):
                 raise IntentError(f"record already exists: {path}")
             writes[path] = canonical(value) + b"\n"
             event["records"].append({"type": kind, "id": value["id"], "revision": value["revision"]})

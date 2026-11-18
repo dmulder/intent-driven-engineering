@@ -7,7 +7,7 @@ and remain pending verification rather than silently imposing present-day constr
 import copy
 import json
 
-from .. import cli
+from .. import cli, storage
 from ..core import (IntentError, ValidationError, canonical, changes_between, digest, git_environment, head,
                     identity, metadata, put_object, record_path, safe_path, seal, snapshot,
                     source, validate, write_json)
@@ -93,7 +93,7 @@ def _publish(root, journal, transaction):
             raise TrueUpError('invalid historical import transaction path')
         existing = root / path
         mutable = path == '.intent/manifests/current.json' or path.startswith('.intent/schema/')
-        if existing.exists() and not mutable and existing.read_bytes() != canonical(value) + b'\n':
+        if storage.record_exists(existing) and not mutable and storage.read_record(existing) != canonical(value) + b'\n':
             raise TrueUpError(f'conflicting canonical record during historical import: {path}')
     proposed = snapshot(root, staged=True)
     proposed = {p: v for p, v in proposed.items() if not metadata(p)}
@@ -104,9 +104,11 @@ def _publish(root, journal, transaction):
     if errors:
         raise ValidationError(errors)
     write_json(journal, transaction)
+    storage.write_records(root, {path: value for path, value in writes.items() if storage.is_record(path)})
     for path, value in writes.items():
         if path != '.intent/manifests/current.json':
-            write_json(root / path, value, immutable=not path.startswith('.intent/schema/'))
+            if not storage.is_record(path):
+                write_json(root / path, value, immutable=not path.startswith('.intent/schema/'))
             fault('import:after_record_write')
     write_json(root / '.intent/manifests/current.json', target)
     fault('import:after_manifest_write')
@@ -114,7 +116,7 @@ def _publish(root, journal, transaction):
 
 
 def import_history(repo, graph, scope, coverage, max_snapshot_bytes=1_500_000):
-    with git_environment(git_env(), GIT_GLOBAL_ARGS):
+    with git_environment(git_env(), GIT_GLOBAL_ARGS), storage.read_session():
         return _import_history(repo, graph, scope, coverage, max_snapshot_bytes)
 
 
@@ -123,7 +125,7 @@ def _import_history(repo, graph, scope, coverage, max_snapshot_bytes):
     if root is None:
         raise TrueUpError('historical import requires a working tree')
     # One canonical writer even when operators choose different processing caches.
-    with Store(root / '.intent/cache/trueup/canonical-writer'):
+    with cli.writer_lock(root), Store(root / '.intent/cache/trueup/canonical-writer'):
         journal = root / '.intent/drafts/trueup-import.json'
         if journal.exists():
             _publish(root, journal, json.loads(journal.read_text()))
