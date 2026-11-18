@@ -25,7 +25,7 @@ class EndToEnd(TrueUpTest):
 
     def records(self):
         root = self.repo.path / '.intent'
-        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*.json')
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()
                 if not any(part in ('cache','drafts') for part in p.relative_to(root).parts)}
 
     def start(self):
@@ -35,6 +35,16 @@ class EndToEnd(TrueUpTest):
         self.assertIn('import', result)
         self.assertTrue(result['complete'], result)
         return commits
+
+    def test_import_serializes_with_ordinary_metadata_writers(self):
+        self.small_history()
+        self.init(providers={'fake': provider_spec()})
+        with cli.writer_lock(self.repo.path):
+            result = self.run_ai(ok=4)
+        self.assertIn('another intentctl writer', result['import_error'])
+        resumed = self.run_ai()
+        self.assertTrue(resumed['complete'])
+        self.assertEqual(resumed['ai_calls'], 0)
 
     def test_default_run_imports_actual_records_and_historical_revisions(self):
         c1, c2, c3, c4 = self.start()
@@ -133,7 +143,7 @@ class EndToEnd(TrueUpTest):
         self.assertTrue(result['import']['intents'])
         self.assertTrue((self.repo.path/'.intent/cache/trueup/meta.json').exists())
         status = self.repo.git('status','--porcelain','--untracked-files=all').stdout.decode()
-        self.assertIn('.intent/intents/',status)
+        self.assertIn('.intent/records/',status)
         self.assertNotIn('.intent/cache/',status)
         self.assertFalse((self.repo.path/'.git/intent-trueup').exists())
 

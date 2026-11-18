@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import difflib
 from functools import lru_cache
+from . import storage
 import hashlib
 import json
 import os
@@ -200,7 +201,7 @@ def snapshot(root, revision=None, staged=False, working=False):
                     name = file.relative_to(root).as_posix()
                     if file.is_file() and not file.is_symlink() and not any(p in ("drafts", "cache") for p in file.relative_to(intent).parts):
                         entries[name] = ("100644", file.read_bytes())
-    return entries
+    return storage.unpack(entries)
 
 
 def source(entries):
@@ -224,9 +225,7 @@ def object_record(data):
 
 
 def put_object(root, data):
-    record = object_record(data)
-    write_json(root / ".intent/objects" / (record["id"] + ".json"), record, immutable=True)
-    return record["id"]
+    return storage.put_source(root, data)
 
 
 @lru_cache(maxsize=None)
@@ -389,6 +388,7 @@ EMPTY_MANIFEST = {"schema_version": 1, "intents": {}, "bindings": {}, "events": 
 
 class Store:
     def __init__(self, entries, enforce_schema_definitions=True):
+        entries = storage.unpack(entries)
         self.entries = entries
         self.records = {}
         self.errors = []
@@ -414,7 +414,7 @@ class Store:
                     self.error("UNKNOWN_RECORD", path, "unknown schema file")
                 continue
             if not path.endswith(".json"):
-                if path not in (".intent/README.md", ".intent/.gitignore"):
+                if path not in (".intent/README.md", ".intent/.gitignore", ".intent/.gitattributes"):
                     self.error("UNKNOWN_RECORD", path, "only defined canonical records and metadata documentation are allowed")
                 continue
             try:
@@ -578,6 +578,11 @@ class Store:
 
 
 def validate(entries, base_entries=None, *, enforce_schema_definitions=True):
+    try:
+        entries = storage.unpack(entries)
+        base_entries = storage.unpack(base_entries or {})
+    except IntentError as exc:
+        return [{"code": "STORAGE", "path": ".intent", "message": str(exc)}]
     # Historical audits can separately report old schema pins. Record validation
     # still uses this engine's trusted SCHEMAS, never repository-supplied schemas.
     store = Store(entries, enforce_schema_definitions=enforce_schema_definitions)
