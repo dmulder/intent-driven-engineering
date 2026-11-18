@@ -13,6 +13,7 @@ from . import ANALYSIS_VERSION, RECONSTRUCTED_LABEL, PROMPT_VERSION, STATE_FORMA
 from . import analysis, engine as engine_mod, forge as forge_mod, gitscan, graph as graph_mod, query as query_mod
 from .providers import (BUILTIN_PROVIDERS, Budget, Caller, Circuits, build_providers)
 from .store import Store, default_state_dir
+from .progress import Progress
 from .importer import import_history
 from .util import FatalStateError, TrueUpError, dumps, iso, now, read_json
 
@@ -430,31 +431,34 @@ def cmd_run(args, prepare=None):
             prepare(eng)
         items = eng.select(shas=args.only)
         say(f"selected {len(items)} of {len(eng.manifest['commits'])} commits (ai={'yes' if eng.ai else 'no'}, forge network={'yes' if eng.network else 'no'}, jobs={args.jobs})")
-        status, report = eng.run(items, max_commits=args.max_commits)
-        query_mod.write_coverage_cache(store, report)
-        result = summarize_run(status, report, eng, scope_check)
-        if eng.ai and not args.dry_run:
-            try:
-                store.put("imports", "latest", {"status": "pending"})
-                result["import"] = import_history(repo, graph_mod.load_graph(store), eng.manifest, report,
-                                                   eng.limits["max_diff_bytes"])
-                result["import"]["status"] = "complete"
-                store.put("imports", "latest", result["import"])
-                result["next"].append("git add .intent && intentctl validate --staged, then commit the imported history")
-            except Exception as exc:
-                from ..core import IntentError
-                if not isinstance(exc, (IntentError, TrueUpError)):
-                    raise
-                result.update(status="incomplete", complete=False, exit_code=4,
-                              import_error=f"canonical historical import failed: {exc}")
-                store.put("imports", "latest", {"status": "failed", "error": result["import_error"]})
-                result["next"].append("fix the import error and rerun; analysis checkpoints are retained")
-        run_record = read_json(store.path / "runs" / (eng.run_id + ".json"))
-        run_record.update(status=result["status"], canonical_import=result.get("import"), import_error=result.get("import_error"))
-        store.write_run(eng.run_id, run_record)
-        if state.get("signal") == signal.SIGTERM:
-            result["exit_code"] = 143
-        return result
+        with Progress(len(items)) as progress:
+            status, report = eng.run(items, max_commits=args.max_commits, progress=progress)
+            query_mod.write_coverage_cache(store, report)
+            result = summarize_run(status, report, eng, scope_check)
+            if eng.ai and not args.dry_run:
+                try:
+                    store.put("imports", "latest", {"status": "pending"})
+                    progress.waiting("importing canonical intent history")
+                    progress.render()
+                    result["import"] = import_history(repo, graph_mod.load_graph(store), eng.manifest, report,
+                                                       eng.limits["max_diff_bytes"])
+                    result["import"]["status"] = "complete"
+                    store.put("imports", "latest", result["import"])
+                    result["next"].append("git add .intent && intentctl validate --staged, then commit the imported history")
+                except Exception as exc:
+                    from ..core import IntentError
+                    if not isinstance(exc, (IntentError, TrueUpError)):
+                        raise
+                    result.update(status="incomplete", complete=False, exit_code=4,
+                                  import_error=f"canonical historical import failed: {exc}")
+                    store.put("imports", "latest", {"status": "failed", "error": result["import_error"]})
+                    result["next"].append("fix the import error and rerun; analysis checkpoints are retained")
+            run_record = read_json(store.path / "runs" / (eng.run_id + ".json"))
+            run_record.update(status=result["status"], canonical_import=result.get("import"), import_error=result.get("import_error"))
+            store.write_run(eng.run_id, run_record)
+            if state.get("signal") == signal.SIGTERM:
+                result["exit_code"] = 143
+            return result
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)

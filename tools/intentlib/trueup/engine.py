@@ -95,7 +95,7 @@ class Engine:
         return False
 
     # -- the run ---------------------------------------------------------------------------
-    def run(self, items, max_commits=0, progress_every=25):
+    def run(self, items, max_commits=0, progress_every=25, progress=None):
         started = now()
         run_id = iso(started).replace(":", "").replace("-", "") + "-" + uuid.uuid4().hex[:6]
         self.run_id = run_id
@@ -120,6 +120,8 @@ class Engine:
                         break
                     item, future = inflight.pop(0)
                     try:
+                        if progress:
+                            progress.waiting(f"waiting for {item['sha'][:12]} (provider or local work)")
                         rec = future.result()
                     except FatalStateError:
                         raise
@@ -128,13 +130,20 @@ class Engine:
                         continue
                     except Exception as exc:  # defensive: _work already isolates, but never let one commit end the run
                         self._record_worker_crash(item, exc)
+                        if progress:
+                            progress.completed({"analysis": {"status": "failed"}})
                         continue
                     if rec is None:
                         continue
+                    if progress:
+                        progress.waiting(f"linking {item['sha'][:12]}")
                     live = self._integrate(item, rec, live)
+                    if progress:
+                        progress.completed(rec)
                     done += 1
                     if progress_every and done % progress_every == 0:
-                        self.out(f"  {done}/{len(items)} commits processed")
+                        if not progress:
+                            self.out(f"  {done}/{len(items)} commits processed")
                         self._persist_graph(live)
                     if self.stop_reason and self.stop_reason.startswith("budget"):
                         break
@@ -146,6 +155,8 @@ class Engine:
                 status = "budget_exhausted"
             elif position < len(items):
                 status = "trial_limit"
+            if progress:
+                progress.waiting("saving graph")
             self._finish_graph()
         except FatalStateError as exc:
             status = "fatal"
